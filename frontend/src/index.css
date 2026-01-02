@@ -1,0 +1,220 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #12121a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a2a3a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a4a;
+}
+
+/* Selection color */
+::selection {
+  background: rgba(139, 92, 246, 0.4);
+  color: #fff;
+}
+
+/* Base styles */
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  
+  body {
+    @apply bg-surface text-gray-100 font-sans;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  
+  /* Monospace text for data */
+  .font-data {
+    @apply font-mono text-sm tracking-tight;
+  }
+}
+
+/* Component styles */
+@layer components {
+  /* Panel styles */
+  .panel {
+    @apply bg-surface-raised border border-surface-border rounded-lg;
+  }
+  
+  .panel-header {
+    @apply px-4 py-3 border-b border-surface-border flex items-center justify-between;
+  }
+  
+  .panel-title {
+    @apply text-sm font-semibold text-gray-200 uppercase tracking-wider;
+  }
+  
+  .panel-content {
+    @apply p-4;
+  }
+  
+  /* Button styles */
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium text-sm transition-all duration-200;
+    @apply focus:outline-none focus:ring-2 focus:ring-cyber-500 focus:ring-offset-2 focus:ring-offset-surface;
+  }
+  
+  .btn-primary {
+    @apply bg-cyber-600 text-white hover:bg-cyber-500;
+  }
+  
+  .btn-secondary {
+    @apply bg-surface-overlay text-gray-300 hover:bg-surface-border hover:text-white;
+  }
+  
+  .btn-danger {
+    @apply bg-threat-critical text-white hover:bg-red-600;
+  }
+  
+  .btn-icon {
+    @apply p-2 rounded-md hover:bg-surface-overlay transition-colors;
+  }
+  
+  /* Input styles */
+  .input {
+    @apply bg-surface border border-surface-border rounded-md px-3 py-2 text-sm;
+    @apply text-gray-100 placeholder-gray-500;
+    @apply focus:outline-none focus:ring-2 focus:ring-cyber-500 focus:border-transparent;
+  }
+  
+  /* Badge styles */
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  }
+  
+  .badge-protocol-tcp { @apply bg-protocol-tcp/20 text-protocol-tcp; }
+  .badge-protocol-udp { @apply bg-protocol-udp/20 text-protocol-udp; }
+  .badge-protocol-icmp { @apply bg-protocol-icmp/20 text-protocol-icmp; }
+  .badge-protocol-dns { @apply bg-protocol-dns/20 text-protocol-dns; }
+  .badge-protocol-http { @apply bg-protocol-http/20 text-protocol-http; }
+  .badge-protocol-https { @apply bg-protocol-https/20 text-protocol-https; }
+  .badge-protocol-smb { @apply bg-protocol-smb/20 text-protocol-smb; }
+  .badge-protocol-quic { @apply bg-protocol-quic/20 text-protocol-quic; }
+  
+  .badge-threat-critical { @apply bg-threat-critical/20 text-threat-critical; }
+  .badge-threat-high { @apply bg-threat-high/20 text-threat-high; }
+  .badge-threat-medium { @apply bg-threat-medium/20 text-threat-medium; }
+  .badge-threat-low { @apply bg-threat-low/20 text-threat-low; }
+  .badge-threat-info { @apply bg-threat-info/20 text-threat-info; }
+  
+  /* Table styles */
+  .table-header {
+    @apply sticky top-0 bg-surface-raised z-10;
+  }
+  
+  .table-row {
+    @apply border-b border-surface-border hover:bg-surface-overlay transition-colors cursor-pointer;
+  }
+  
+  .table-row-selected {
+    @apply bg-cyber-900/30 border-l-2 border-l-cyber-500;
+  }
+  
+  .table-cell {
+    @apply px-3 py-2 text-sm whitespace-nowrap;
+  }
+  
+  /* Hex viewer styles */
+  .hex-offset {
+    @apply text-gray-500 select-none;
+  }
+  
+  .hex-byte {
+    @apply font-mono text-xs;
+  }
+  
+  .hex-byte-printable {
+    @apply text-cyber-400;
+  }
+  
+  .hex-byte-nonprintable {
+    @apply text-gray-600;
+  }
+  
+  .hex-byte-selected {
+    @apply bg-cyber-600 text-white rounded;
+  }
+  
+  .hex-ascii {
+    @apply text-gray-400 font-mono text-xs;
+  }
+  
+  /* Status indicator */
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+  
+  .status-dot-active {
+    @apply bg-green-500 animate-pulse;
+  }
+  
+  .status-dot-inactive {
+    @apply bg-gray-500;
+  }
+  
+  .status-dot-warning {
+    @apply bg-yellow-500 animate-pulse;
+  }
+  
+  .status-dot-error {
+    @apply bg-red-500 animate-pulse;
+  }
+  
+  /* Glow effects */
+  .glow-cyber {
+    box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+  }
+  
+  .glow-threat {
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+  }
+}
+
+/* Utility classes */
+@layer utilities {
+  /* Text truncation */
+  .truncate-middle {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  /* Grid background */
+  .bg-grid {
+    background-image: linear-gradient(rgba(139, 92, 246, 0.03) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(139, 92, 246, 0.03) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+  
+  /* Gradient text */
+  .text-gradient-cyber {
+    @apply bg-gradient-to-r from-cyber-400 to-cyber-600 bg-clip-text text-transparent;
+  }
+  
+  /* Hide scrollbar but keep functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}

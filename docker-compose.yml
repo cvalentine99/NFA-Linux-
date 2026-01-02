@@ -1,0 +1,279 @@
+# NFA-Linux Docker Compose Configuration
+# Full stack deployment with ML sidecar
+#
+# Usage:
+#   docker-compose up -d              # Start all services
+#   docker-compose logs -f nfa        # View logs
+#   docker-compose down               # Stop all services
+#   docker-compose down -v            # Stop and remove volumes
+
+version: '3.9'
+
+services:
+  # ==========================================================================
+  # NFA-Linux Main Application
+  # ==========================================================================
+  nfa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+      args:
+        VERSION: ${VERSION:-0.1.0}
+        BUILD_TIME: ${BUILD_TIME:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    image: nfa-linux:${VERSION:-latest}
+    container_name: nfa-linux
+    hostname: nfa-linux
+    restart: unless-stopped
+    
+    # Required capabilities for packet capture
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    
+    # Network mode for packet capture
+    # Use 'host' for capturing on host interfaces
+    # Use 'bridge' for isolated network testing
+    network_mode: host
+    
+    # Environment variables
+    environment:
+      - TZ=${TZ:-UTC}
+      - NFA_LOG_LEVEL=${LOG_LEVEL:-info}
+      - NFA_ML_ENABLED=${ML_ENABLED:-false}
+      - NFA_ML_ADDRESS=nfa-ml:50051
+    
+    # Volumes
+    volumes:
+      - nfa-data:/app/data
+      - nfa-output:/app/output
+      - nfa-logs:/app/logs
+      - ./config:/app/config:ro
+      # Mount PCAP files for analysis
+      - ${PCAP_DIR:-./pcaps}:/app/pcaps:ro
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    
+    # Health check
+    healthcheck:
+      test: ["/app/nfa-linux", "-version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    
+    # Dependencies
+    depends_on:
+      nfa-ml:
+        condition: service_healthy
+        required: false
+
+  # ==========================================================================
+  # ML Sidecar Service
+  # ==========================================================================
+  nfa-ml:
+    build:
+      context: ./ml_sidecar
+      dockerfile: Dockerfile
+    image: nfa-linux-ml:${VERSION:-latest}
+    container_name: nfa-linux-ml
+    hostname: nfa-ml
+    restart: unless-stopped
+    
+    # Environment
+    environment:
+      - TZ=${TZ:-UTC}
+      - GRPC_PORT=50051
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MODEL_PATH=/app/models
+      - CUDA_VISIBLE_DEVICES=${CUDA_DEVICES:-}
+    
+    # Volumes
+    volumes:
+      - nfa-models:/app/models
+      - nfa-ml-logs:/app/logs
+    
+    # Ports (internal only when using host network for main app)
+    expose:
+      - "50051"
+    
+    # For GPU support (NVIDIA)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    
+    # Only start if ML is enabled
+    profiles:
+      - ml
+
+  # ==========================================================================
+  # Elasticsearch for Log Storage (Optional)
+  # ==========================================================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: nfa-elasticsearch
+    hostname: elasticsearch
+    restart: unless-stopped
+    
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    
+    ports:
+      - "9200:9200"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q 'green\\|yellow'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    
+    profiles:
+      - elk
+
+  # ==========================================================================
+  # Kibana for Visualization (Optional)
+  # ==========================================================================
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: nfa-kibana
+    hostname: kibana
+    restart: unless-stopped
+    
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    
+    ports:
+      - "5601:5601"
+    
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q 'available'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    
+    profiles:
+      - elk
+
+  # ==========================================================================
+  # Redis for Caching (Optional)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: nfa-redis
+    hostname: redis
+    restart: unless-stopped
+    
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    
+    volumes:
+      - redis-data:/data
+    
+    ports:
+      - "6379:6379"
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    
+    profiles:
+      - cache
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  nfa-data:
+    driver: local
+    name: nfa-linux-data
+  
+  nfa-output:
+    driver: local
+    name: nfa-linux-output
+  
+  nfa-logs:
+    driver: local
+    name: nfa-linux-logs
+  
+  nfa-models:
+    driver: local
+    name: nfa-linux-models
+  
+  nfa-ml-logs:
+    driver: local
+    name: nfa-linux-ml-logs
+  
+  es-data:
+    driver: local
+    name: nfa-elasticsearch-data
+  
+  redis-data:
+    driver: local
+    name: nfa-redis-data
+
+# ==========================================================================
+# Networks (when not using host mode)
+# ==========================================================================
+networks:
+  default:
+    name: nfa-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

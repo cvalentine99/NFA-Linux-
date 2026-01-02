@@ -1,0 +1,34 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "nfa-linux",
+  "outputfilename": "nfa-linux",
+  "frontend:install": "pnpm install",
+  "frontend:build": "pnpm run build",
+  "frontend:dev:watcher": "pnpm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "NFA-Linux Team",
+    "email": "team@nfa-linux.io"
+  },
+  "info": {
+    "companyName": "NFA-Linux",
+    "productName": "Network Forensic Analyzer",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026 NFA-Linux Team",
+    "comments": "Next-Generation Network Forensic Analyzer for Linux"
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": "",
+  "bindings": {
+    "ts_generation": {
+      "outputType": "classes",
+      "prefix": "",
+      "suffix": ""
+    }
+  },
+  "wailsjsdir": "./frontend/src/wailsjs",
+  "assetdir": "./frontend/dist",
+  "reloaddirs": "./frontend/src",
+  "debounceMS": 100
+}

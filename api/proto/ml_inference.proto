@@ -1,0 +1,280 @@
+syntax = "proto3";
+
+package nfa.ml;
+
+option go_package = "github.com/cvalentine99/nfa-linux/api/mlpb";
+
+// MLInference service provides machine learning inference capabilities
+service MLInference {
+  // Predict performs inference on flow features
+  rpc PredictFlow(FlowPredictRequest) returns (FlowPredictResponse);
+  
+  // PredictBatch performs batched inference on multiple flows
+  rpc PredictFlowBatch(FlowBatchRequest) returns (FlowBatchResponse);
+  
+  // PredictDNS performs DNS tunneling detection
+  rpc PredictDNS(DNSPredictRequest) returns (DNSPredictResponse);
+  
+  // PredictTLS performs TLS fingerprint classification
+  rpc PredictTLS(TLSPredictRequest) returns (TLSPredictResponse);
+  
+  // DetectAnomaly performs anomaly detection on flow features
+  rpc DetectAnomaly(AnomalyRequest) returns (AnomalyResponse);
+  
+  // ClassifyTraffic classifies network traffic type
+  rpc ClassifyTraffic(TrafficClassifyRequest) returns (TrafficClassifyResponse);
+  
+  // StreamPredict performs streaming inference
+  rpc StreamPredict(stream FlowPredictRequest) returns (stream FlowPredictResponse);
+  
+  // GetModelInfo returns information about loaded models
+  rpc GetModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+  
+  // HealthCheck checks the service health
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// FlowPredictRequest contains flow features for prediction
+message FlowPredictRequest {
+  string flow_id = 1;
+  FlowFeatures features = 2;
+  string model_name = 3;
+}
+
+// FlowFeatures contains extracted flow features
+message FlowFeatures {
+  // Basic flow statistics
+  float duration = 1;
+  float total_packets = 2;
+  float total_bytes = 3;
+  float packets_per_sec = 4;
+  float bytes_per_sec = 5;
+  
+  // Directional statistics
+  float fwd_packets = 6;
+  float bwd_packets = 7;
+  float fwd_bytes = 8;
+  float bwd_bytes = 9;
+  float fwd_bwd_ratio = 10;
+  
+  // Packet size statistics
+  float min_packet_len = 11;
+  float max_packet_len = 12;
+  float mean_packet_len = 13;
+  float std_packet_len = 14;
+  
+  // Inter-arrival time statistics
+  float min_iat = 15;
+  float max_iat = 16;
+  float mean_iat = 17;
+  float std_iat = 18;
+  
+  // TCP flags
+  float syn_count = 19;
+  float ack_count = 20;
+  float fin_count = 21;
+  float rst_count = 22;
+  float psh_count = 23;
+  float urg_count = 24;
+  
+  // Payload statistics
+  float payload_entropy = 25;
+  float payload_mean = 26;
+  float payload_std = 27;
+  
+  // Protocol indicators
+  float is_tcp = 28;
+  float is_udp = 29;
+  float is_http = 30;
+  float is_https = 31;
+  float is_dns = 32;
+  float is_smb = 33;
+  float is_quic = 34;
+  
+  // Port features
+  float src_port_norm = 35;
+  float dst_port_norm = 36;
+  float is_well_known_port = 37;
+  float is_ephemeral_port = 38;
+}
+
+// FlowPredictResponse contains the prediction result
+message FlowPredictResponse {
+  string flow_id = 1;
+  string label = 2;
+  float confidence = 3;
+  repeated float probabilities = 4;
+  repeated string class_labels = 5;
+  float latency_ms = 6;
+}
+
+// FlowBatchRequest contains multiple flows for batch prediction
+message FlowBatchRequest {
+  repeated FlowPredictRequest requests = 1;
+}
+
+// FlowBatchResponse contains batch prediction results
+message FlowBatchResponse {
+  repeated FlowPredictResponse responses = 1;
+  float total_latency_ms = 2;
+}
+
+// DNSPredictRequest contains DNS query features
+message DNSPredictRequest {
+  string query_id = 1;
+  string domain = 2;
+  uint32 query_type = 3;
+  DNSFeatures features = 4;
+}
+
+// DNSFeatures contains extracted DNS features
+message DNSFeatures {
+  float domain_length = 1;
+  float subdomain_count = 2;
+  float max_label_length = 3;
+  float avg_label_length = 4;
+  float numeric_ratio = 5;
+  float alpha_ratio = 6;
+  float special_ratio = 7;
+  float consonant_ratio = 8;
+  float vowel_ratio = 9;
+  float domain_entropy = 10;
+  float label_entropy = 11;
+  float bigram_entropy = 12;
+  float trigram_entropy = 13;
+  float query_type_norm = 14;
+  float is_reverse_lookup = 15;
+  float has_digits = 16;
+  float has_hyphens = 17;
+  float tld_length = 18;
+  float is_common_tld = 19;
+}
+
+// DNSPredictResponse contains DNS prediction result
+message DNSPredictResponse {
+  string query_id = 1;
+  bool is_tunneling = 2;
+  bool is_dga = 3;
+  float tunneling_score = 4;
+  float dga_score = 5;
+  string threat_type = 6;
+  float confidence = 7;
+}
+
+// TLSPredictRequest contains TLS handshake features
+message TLSPredictRequest {
+  string flow_id = 1;
+  string ja3_hash = 2;
+  string ja4_fingerprint = 3;
+  TLSFeatures features = 4;
+}
+
+// TLSFeatures contains extracted TLS features
+message TLSFeatures {
+  float cipher_suite_count = 1;
+  float extension_count = 2;
+  float supported_versions = 3;
+  float signature_alg_count = 4;
+  float supported_group_count = 5;
+  float ja3_hash_entropy = 6;
+  float ja4_hash_entropy = 7;
+  float is_tls10 = 8;
+  float is_tls11 = 9;
+  float is_tls12 = 10;
+  float is_tls13 = 11;
+  float has_alpn = 12;
+  float alpn_protocol_count = 13;
+  float supports_http2 = 14;
+  float supports_http3 = 15;
+  float sni_length = 16;
+  float sni_entropy = 17;
+  float sni_has_digits = 18;
+}
+
+// TLSPredictResponse contains TLS classification result
+message TLSPredictResponse {
+  string flow_id = 1;
+  string client_type = 2;
+  string application = 3;
+  bool is_malicious = 4;
+  float malicious_score = 5;
+  string threat_category = 6;
+  float confidence = 7;
+}
+
+// AnomalyRequest contains features for anomaly detection
+message AnomalyRequest {
+  string entity_id = 1;
+  repeated float features = 2;
+  string model_name = 3;
+}
+
+// AnomalyResponse contains anomaly detection result
+message AnomalyResponse {
+  string entity_id = 1;
+  bool is_anomaly = 2;
+  float anomaly_score = 3;
+  float threshold = 4;
+  repeated float feature_contributions = 5;
+}
+
+// TrafficClassifyRequest contains traffic for classification
+message TrafficClassifyRequest {
+  string flow_id = 1;
+  FlowFeatures features = 2;
+  bytes payload_sample = 3;
+}
+
+// TrafficClassifyResponse contains traffic classification result
+message TrafficClassifyResponse {
+  string flow_id = 1;
+  string application = 2;
+  string category = 3;
+  float confidence = 4;
+  repeated ClassProbability top_predictions = 5;
+}
+
+// ClassProbability represents a class and its probability
+message ClassProbability {
+  string class_name = 1;
+  float probability = 2;
+}
+
+// ModelInfoRequest requests information about models
+message ModelInfoRequest {
+  string model_name = 1;
+}
+
+// ModelInfoResponse contains model information
+message ModelInfoResponse {
+  repeated ModelInfo models = 1;
+}
+
+// ModelInfo contains information about a single model
+message ModelInfo {
+  string name = 1;
+  string version = 2;
+  string description = 3;
+  repeated string input_names = 4;
+  repeated string output_names = 5;
+  repeated int64 input_shape = 6;
+  repeated int64 output_shape = 7;
+  repeated string class_labels = 8;
+  string framework = 9;
+  int64 loaded_at = 10;
+  int64 inference_count = 11;
+  float avg_latency_ms = 12;
+}
+
+// HealthCheckRequest is an empty health check request
+message HealthCheckRequest {}
+
+// HealthCheckResponse contains health status
+message HealthCheckResponse {
+  bool healthy = 1;
+  string status = 2;
+  int64 uptime_seconds = 3;
+  map<string, bool> model_status = 4;
+  float gpu_memory_used_mb = 5;
+  float cpu_usage_percent = 6;
+}
