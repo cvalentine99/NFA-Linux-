@@ -163,6 +163,8 @@ export interface Alert {
   indicators: string[];
   mitreTactics?: string[];
   mitreTechniques?: string[];
+  acknowledged?: boolean;
+  acknowledgedAt?: number;
 }
 
 export type AlertSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';

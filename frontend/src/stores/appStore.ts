@@ -207,10 +207,14 @@ export const useAppStore = create<AppState>()(
     }),
     
     acknowledgeAlert: (id) => set((state) => {
-      // Mark alert as acknowledged (could add acknowledged field)
       const alert = state.alerts.get(id)
       if (alert) {
-        // Could add acknowledged: true field
+        // Update the alert with acknowledged status
+        state.alerts.set(id, {
+          ...alert,
+          acknowledged: true,
+          acknowledgedAt: Date.now() * 1000000, // Convert to nanoseconds
+        })
       }
     }),
     

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"net"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -500,27 +501,27 @@ func processPacket(data []byte) {
 
 func formatSize(size int) string {
 	if size >= 1024*1024 {
-		return string(rune(size/(1024*1024))) + "MB"
+		return strconv.Itoa(size/(1024*1024)) + "MB"
 	}
 	if size >= 1024 {
-		return string(rune(size/1024)) + "KB"
+		return strconv.Itoa(size/1024) + "KB"
 	}
-	return string(rune(size)) + "B"
+	return strconv.Itoa(size) + "B"
 }
 
 func formatWorkers(n int) string {
-	return string(rune(n)) + "_workers"
+	return strconv.Itoa(n) + "_workers"
 }
 
 func formatChunks(n int) string {
-	return string(rune(n)) + "_chunks"
+	return strconv.Itoa(n) + "_chunks"
 }
 
 func formatBuffer(n int) string {
 	if n == 0 {
 		return "unbuffered"
 	}
-	return "buf_" + string(rune(n))
+	return "buf_" + strconv.Itoa(n)
 }
 
 func createLongDomainQuery() []byte {
@@ -530,7 +531,7 @@ func createLongDomainQuery() []byte {
 	// Long subdomain chain
 	for i := 0; i < 10; i++ {
 		buf.WriteByte(10)
-		buf.WriteString("subdomain" + string(rune('0'+i)))
+		buf.WriteString("subdomain" + strconv.Itoa(i))
 	}
 	buf.WriteByte(7)
 	buf.WriteString("example")

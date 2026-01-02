@@ -5,13 +5,15 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -562,11 +564,57 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 			return data[23] == 1 // ICMP protocol
 		}, nil
 	
+	case strings.HasPrefix(filter, "port "):
+		// Parse port filter: "port 80" or "port 443"
+		portStr := strings.TrimPrefix(filter, "port ")
+		port, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port filter '%s': %w", filter, err)
+		}
+		portBytes := uint16(port)
+		return func(data []byte) bool {
+			if len(data) < 36 { // Ethernet + IP + TCP/UDP headers
+				return false
+			}
+			etherType := binary.BigEndian.Uint16(data[12:14])
+			if etherType != 0x0800 {
+				return false
+			}
+			ihl := int(data[14]&0x0F) * 4
+			if len(data) < 14+ihl+4 {
+				return false
+			}
+			srcPort := binary.BigEndian.Uint16(data[14+ihl : 14+ihl+2])
+			dstPort := binary.BigEndian.Uint16(data[14+ihl+2 : 14+ihl+4])
+			return srcPort == portBytes || dstPort == portBytes
+		}, nil
+
+	case strings.HasPrefix(filter, "host "):
+		// Parse host filter: "host 192.168.1.1"
+		hostStr := strings.TrimPrefix(filter, "host ")
+		hostIP := net.ParseIP(hostStr)
+		if hostIP == nil {
+			return nil, fmt.Errorf("invalid host filter '%s': invalid IP address", filter)
+		}
+		hostIP4 := hostIP.To4()
+		if hostIP4 == nil {
+			return nil, fmt.Errorf("invalid host filter '%s': only IPv4 supported", filter)
+		}
+		return func(data []byte) bool {
+			if len(data) < 34 {
+				return false
+			}
+			etherType := binary.BigEndian.Uint16(data[12:14])
+			if etherType != 0x0800 {
+				return false
+			}
+			// Compare source and destination IPs
+			return bytes.Equal(data[26:30], hostIP4) || bytes.Equal(data[30:34], hostIP4)
+		}, nil
+
 	default:
-		// For complex filters, accept all and log warning
-		// In production, this would use a full BPF compiler
-		fmt.Fprintf(os.Stderr, "afxdp: complex filter '%s' using software filtering\n", filter)
-		return func([]byte) bool { return true }, nil
+		// Return error for unsupported complex filters instead of silent accept-all
+		return nil, fmt.Errorf("unsupported BPF filter '%s': only 'tcp', 'udp', 'icmp', 'port N', 'host IP' are supported", filter)
 	}
 }
 

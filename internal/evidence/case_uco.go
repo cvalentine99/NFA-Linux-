@@ -102,7 +102,7 @@ func (b *CASEBundle) SaveToFile(path string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0640) // Restrict read access to owner and group only for evidence files
 }
 
 // UCOObject represents a base UCO object.

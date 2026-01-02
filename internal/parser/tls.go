@@ -3,6 +3,7 @@ package parser
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -744,8 +745,8 @@ func isIPAddress(s string) bool {
 	return true
 }
 
-// sha256Hash computes SHA256 hash and returns hex string.
+// sha256Hash computes SHA256 hash and returns first 12 bytes as hex string (JA4 spec).
 func sha256Hash(s string) string {
-	h := md5.Sum([]byte(s)) // Using MD5 for shorter hash, actual JA4 uses truncated SHA256
-	return hex.EncodeToString(h[:])
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:12]) // JA4 uses truncated SHA256 (first 12 bytes = 24 hex chars)
 }
