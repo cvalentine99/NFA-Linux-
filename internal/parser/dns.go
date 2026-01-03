@@ -273,3 +273,240 @@ func (c *DNSCache) Cleanup() {
 		}
 	}
 }
+
+// =============================================================================
+// Raw DNS Packet Parsing with Compression Loop Protection
+// =============================================================================
+
+// ParseRawDNS parses raw DNS packet bytes with compression pointer protection.
+// This is used when gopacket's DNS layer is not available or for deep inspection.
+func (p *DNSParser) ParseRawDNS(data []byte) (*RawDNSPacket, error) {
+	if len(data) < 12 {
+		return nil, fmt.Errorf("DNS packet too short: %d bytes", len(data))
+	}
+	
+	pkt := &RawDNSPacket{
+		ID:            uint16(data[0])<<8 | uint16(data[1]),
+		Flags:         uint16(data[2])<<8 | uint16(data[3]),
+		QuestionCount: uint16(data[4])<<8 | uint16(data[5]),
+		AnswerCount:   uint16(data[6])<<8 | uint16(data[7]),
+		NSCount:       uint16(data[8])<<8 | uint16(data[9]),
+		ARCount:       uint16(data[10])<<8 | uint16(data[11]),
+	}
+	
+	// Sanity check counts to prevent DoS
+	if pkt.QuestionCount > 256 || pkt.AnswerCount > 256 || pkt.NSCount > 256 || pkt.ARCount > 256 {
+		return nil, fmt.Errorf("DNS packet has suspicious record counts")
+	}
+	
+	offset := 12
+	
+	// Parse questions
+	for i := uint16(0); i < pkt.QuestionCount && offset < len(data); i++ {
+		name, newOffset, err := p.decodeDNSName(data, offset, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode question name: %w", err)
+		}
+		offset = newOffset
+		
+		if offset+4 > len(data) {
+			return nil, fmt.Errorf("DNS question truncated")
+		}
+		
+		qtype := uint16(data[offset])<<8 | uint16(data[offset+1])
+		qclass := uint16(data[offset+2])<<8 | uint16(data[offset+3])
+		offset += 4
+		
+		pkt.Questions = append(pkt.Questions, RawDNSQuestion{
+			Name:  name,
+			Type:  qtype,
+			Class: qclass,
+		})
+	}
+	
+	// Parse answers
+	for i := uint16(0); i < pkt.AnswerCount && offset < len(data); i++ {
+		rr, newOffset, err := p.decodeDNSResourceRecord(data, offset)
+		if err != nil {
+			// Don't fail on malformed answers, just stop parsing
+			break
+		}
+		offset = newOffset
+		pkt.Answers = append(pkt.Answers, rr)
+	}
+	
+	return pkt, nil
+}
+
+// decodeDNSName decodes a DNS name with compression pointer loop protection.
+// depth tracks recursion to prevent infinite loops from malicious packets.
+func (p *DNSParser) decodeDNSName(data []byte, offset int, depth int) (string, int, error) {
+	// SAFETY: Prevent compression pointer loops
+	if depth > p.MaxLabelDepth {
+		return "", 0, fmt.Errorf("DNS compression pointer depth exceeded (%d)", p.MaxLabelDepth)
+	}
+	
+	if offset >= len(data) {
+		return "", 0, fmt.Errorf("DNS name offset out of bounds")
+	}
+	
+	var name strings.Builder
+	_ = offset // originalOffset used for debugging
+	jumped := false
+	jumpOffset := 0
+	totalLength := 0
+	
+	// Track visited offsets to detect pointer loops
+	visited := make(map[int]bool)
+	
+	for {
+		if offset >= len(data) {
+			return "", 0, fmt.Errorf("DNS name truncated")
+		}
+		
+		// SAFETY: Detect pointer loops
+		if visited[offset] {
+			return "", 0, fmt.Errorf("DNS compression pointer loop detected at offset %d", offset)
+		}
+		visited[offset] = true
+		
+		labelLen := int(data[offset])
+		
+		// Check for compression pointer (top 2 bits set = 0xC0)
+		if labelLen&0xC0 == 0xC0 {
+			if offset+1 >= len(data) {
+				return "", 0, fmt.Errorf("DNS compression pointer truncated")
+			}
+			
+			// Calculate pointer target
+			pointer := int(data[offset]&0x3F)<<8 | int(data[offset+1])
+			
+			// SAFETY: Pointer must point backwards (or at least not forward into unprocessed data)
+			if pointer >= offset {
+				return "", 0, fmt.Errorf("DNS compression pointer points forward: %d >= %d", pointer, offset)
+			}
+			
+			if !jumped {
+				jumpOffset = offset + 2
+				jumped = true
+			}
+			
+			// Recursively decode from pointer target
+			subName, _, err := p.decodeDNSName(data, pointer, depth+1)
+			if err != nil {
+				return "", 0, err
+			}
+			
+			if name.Len() > 0 {
+				name.WriteByte('.')
+			}
+			name.WriteString(subName)
+			break
+		}
+		
+		// End of name
+		if labelLen == 0 {
+			offset++
+			break
+		}
+		
+		// SAFETY: Label length check (max 63 bytes per RFC 1035)
+		if labelLen > 63 {
+			return "", 0, fmt.Errorf("DNS label too long: %d bytes", labelLen)
+		}
+		
+		// SAFETY: Total name length check
+		totalLength += labelLen + 1
+		if totalLength > MaxDNSNameLength {
+			return "", 0, fmt.Errorf("DNS name too long: %d bytes", totalLength)
+		}
+		
+		offset++
+		if offset+labelLen > len(data) {
+			return "", 0, fmt.Errorf("DNS label extends beyond packet")
+		}
+		
+		if name.Len() > 0 {
+			name.WriteByte('.')
+		}
+		name.Write(data[offset : offset+labelLen])
+		offset += labelLen
+	}
+	
+	if jumped {
+		return name.String(), jumpOffset, nil
+	}
+	return name.String(), offset, nil
+}
+
+// decodeDNSResourceRecord decodes a DNS resource record.
+func (p *DNSParser) decodeDNSResourceRecord(data []byte, offset int) (RawDNSResourceRecord, int, error) {
+	var rr RawDNSResourceRecord
+	
+	// Decode name
+	name, newOffset, err := p.decodeDNSName(data, offset, 0)
+	if err != nil {
+		return rr, 0, err
+	}
+	rr.Name = name
+	offset = newOffset
+	
+	// Need at least 10 bytes for type, class, TTL, rdlength
+	if offset+10 > len(data) {
+		return rr, 0, fmt.Errorf("DNS RR truncated")
+	}
+	
+	rr.Type = uint16(data[offset])<<8 | uint16(data[offset+1])
+	rr.Class = uint16(data[offset+2])<<8 | uint16(data[offset+3])
+	rr.TTL = uint32(data[offset+4])<<24 | uint32(data[offset+5])<<16 | uint32(data[offset+6])<<8 | uint32(data[offset+7])
+	rdLength := uint16(data[offset+8])<<8 | uint16(data[offset+9])
+	offset += 10
+	
+	// SAFETY: Validate rdLength
+	if int(rdLength) > len(data)-offset {
+		return rr, 0, fmt.Errorf("DNS RR data length exceeds packet")
+	}
+	
+	rr.RData = data[offset : offset+int(rdLength)]
+	offset += int(rdLength)
+	
+	return rr, offset, nil
+}
+
+// RawDNSPacket represents a parsed DNS packet.
+type RawDNSPacket struct {
+	ID            uint16
+	Flags         uint16
+	QuestionCount uint16
+	AnswerCount   uint16
+	NSCount       uint16
+	ARCount       uint16
+	Questions     []RawDNSQuestion
+	Answers       []RawDNSResourceRecord
+}
+
+// RawDNSQuestion represents a DNS question.
+type RawDNSQuestion struct {
+	Name  string
+	Type  uint16
+	Class uint16
+}
+
+// RawDNSResourceRecord represents a DNS resource record.
+type RawDNSResourceRecord struct {
+	Name  string
+	Type  uint16
+	Class uint16
+	TTL   uint32
+	RData []byte
+}
+
+// IsResponse returns true if this is a DNS response.
+func (p *RawDNSPacket) IsResponse() bool {
+	return p.Flags&0x8000 != 0
+}
+
+// ResponseCode returns the DNS response code.
+func (p *RawDNSPacket) ResponseCode() int {
+	return int(p.Flags & 0x000F)
+}

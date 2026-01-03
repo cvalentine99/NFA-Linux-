@@ -75,6 +75,22 @@ const (
 	SMB2GlobalCapEncryption         uint32 = 0x00000040
 )
 
+// SMB3 encryption algorithms (from Negotiate Context)
+const (
+	SMB2EncryptionAES128CCM uint16 = 0x0001 // AES-128-CCM (SMB 3.0)
+	SMB2EncryptionAES128GCM uint16 = 0x0002 // AES-128-GCM (SMB 3.1.1)
+	SMB2EncryptionAES256CCM uint16 = 0x0003 // AES-256-CCM (SMB 3.1.1)
+	SMB2EncryptionAES256GCM uint16 = 0x0004 // AES-256-GCM (SMB 3.1.1)
+)
+
+// SMB3 Transform Header constants
+const (
+	// Transform Header Protocol ID (0xFD 'S' 'M' 'B')
+	SMB3TransformProtocolID = 0x424D53FD
+	// Transform Header size
+	SMB3TransformHeaderSize = 52
+)
+
 // SMB2 share types
 const (
 	SMB2ShareTypeDisk  uint8 = 0x01
@@ -155,6 +171,26 @@ type SMB2Packet struct {
 	DstPort       uint16
 }
 
+// SMB3TransformHeader represents an SMB3 Transform Header for encrypted messages.
+type SMB3TransformHeader struct {
+	ProtocolID       uint32   // 0xFD 'S' 'M' 'B'
+	Signature        [16]byte // AES-CMAC or AES-GMAC
+	Nonce            [16]byte // 11 bytes for CCM, 12 bytes for GCM
+	OriginalMsgSize  uint32   // Size of encrypted SMB2 message
+	Reserved         uint16
+	Flags            uint16   // 0x0001 = Encrypted
+	SessionID        uint64
+}
+
+// SMBEncryptionInfo holds encryption metadata for a session.
+type SMBEncryptionInfo struct {
+	Algorithm        uint16 // SMB2EncryptionAES128CCM, etc.
+	AlgorithmName    string
+	EncryptedPackets uint64
+	DecryptedPackets uint64
+	FirstSeenNano    int64
+}
+
 // SMBSession represents an SMB session.
 type SMBSession struct {
 	SessionID      uint64
@@ -165,6 +201,9 @@ type SMBSession struct {
 	Dialect        uint16
 	Encrypted      bool
 	SigningEnabled bool
+	
+	// SMB3 Encryption details
+	EncryptionInfo *SMBEncryptionInfo
 	
 	// Connection info
 	ClientIP       string
@@ -360,6 +399,14 @@ func (p *SMBParser) ParsePacket(data []byte, srcIP, dstIP string, srcPort, dstPo
 			return nil, ErrSMBPacketTooShort
 		}
 		offset = 4
+	}
+	
+	// Check for SMB3 Transform Header (encrypted traffic)
+	if len(data) >= offset+4 {
+		protocolID := binary.LittleEndian.Uint32(data[offset:])
+		if protocolID == SMB3TransformProtocolID {
+			return p.parseEncryptedPacket(data[offset:], srcIP, dstIP, srcPort, dstPort, timestampNano)
+		}
 	}
 	
 	// Parse SMB2 header
@@ -1079,4 +1126,127 @@ func GetCommandString(cmd uint16) string {
 		return name
 	}
 	return fmt.Sprintf("Unknown (0x%04X)", cmd)
+}
+
+// =============================================================================
+// SMB3 Encryption Support
+// =============================================================================
+
+// parseEncryptedPacket parses an SMB3 encrypted (Transform Header) packet.
+// Note: This extracts metadata only - decryption requires session keys.
+func (p *SMBParser) parseEncryptedPacket(data []byte, srcIP, dstIP string, srcPort, dstPort uint16, timestampNano int64) (*SMB2Packet, error) {
+	if len(data) < SMB3TransformHeaderSize {
+		return nil, ErrSMBPacketTooShort
+	}
+	
+	// Parse Transform Header
+	transform := &SMB3TransformHeader{
+		ProtocolID: binary.LittleEndian.Uint32(data[0:4]),
+	}
+	copy(transform.Signature[:], data[4:20])
+	copy(transform.Nonce[:], data[20:36])
+	transform.OriginalMsgSize = binary.LittleEndian.Uint32(data[36:40])
+	transform.Reserved = binary.LittleEndian.Uint16(data[40:42])
+	transform.Flags = binary.LittleEndian.Uint16(data[42:44])
+	transform.SessionID = binary.LittleEndian.Uint64(data[44:52])
+	
+	// Validate transform header
+	if transform.ProtocolID != SMB3TransformProtocolID {
+		return nil, fmt.Errorf("invalid SMB3 Transform Header protocol ID: 0x%08X", transform.ProtocolID)
+	}
+	
+	// Sanity check message size (max 16MB)
+	if transform.OriginalMsgSize > 16*1024*1024 {
+		return nil, fmt.Errorf("SMB3 encrypted message too large: %d bytes", transform.OriginalMsgSize)
+	}
+	
+	// Track encryption for this session
+	p.trackEncryptedSession(transform.SessionID, srcIP, dstIP, srcPort, dstPort, timestampNano)
+	
+	// Create a synthetic packet representing the encrypted message
+	// We can't parse the actual content without the session key
+	packet := &SMB2Packet{
+		Header: &SMB2Header{
+			ProtocolID:    [4]byte{0xFD, 'S', 'M', 'B'}, // Transform header marker
+			SessionID:     transform.SessionID,
+			Flags:         SMB2FlagsServerToRedir, // Mark as encrypted
+		},
+		Payload:       data[SMB3TransformHeaderSize:], // Encrypted payload
+		IsRequest:     srcPort > dstPort, // Heuristic: client usually has higher port
+		TimestampNano: timestampNano,
+		SrcIP:         srcIP,
+		DstIP:         dstIP,
+		SrcPort:       srcPort,
+		DstPort:       dstPort,
+	}
+	
+	return packet, nil
+}
+
+// trackEncryptedSession tracks encryption metadata for a session.
+func (p *SMBParser) trackEncryptedSession(sessionID uint64, srcIP, dstIP string, srcPort, dstPort uint16, timestampNano int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	session, ok := p.sessions[sessionID]
+	if !ok {
+		// Create placeholder session for encrypted traffic
+		connKey := fmt.Sprintf("%s:%d-%s:%d", srcIP, srcPort, dstIP, dstPort)
+		session = &SMBSession{
+			SessionID:     sessionID,
+			State:         SMBSessionStateEstablished,
+			Encrypted:     true,
+			ClientIP:      srcIP,
+			ServerIP:      dstIP,
+			ClientPort:    srcPort,
+			ServerPort:    dstPort,
+			StartTimeNano: timestampNano,
+			LastSeenNano:  timestampNano,
+			Trees:         make(map[uint32]*SMBTree),
+			FileHandles:   make(map[string]*SMBFileHandle),
+		}
+		p.sessions[sessionID] = session
+		p.sessionsByConn[connKey] = session
+	}
+	
+	// Update encryption info
+	if session.EncryptionInfo == nil {
+		session.EncryptionInfo = &SMBEncryptionInfo{
+			FirstSeenNano: timestampNano,
+		}
+	}
+	session.EncryptionInfo.EncryptedPackets++
+	session.Encrypted = true
+	session.LastSeenNano = timestampNano
+}
+
+// GetEncryptionAlgorithmName returns a human-readable encryption algorithm name.
+func GetEncryptionAlgorithmName(alg uint16) string {
+	switch alg {
+	case SMB2EncryptionAES128CCM:
+		return "AES-128-CCM"
+	case SMB2EncryptionAES128GCM:
+		return "AES-128-GCM"
+	case SMB2EncryptionAES256CCM:
+		return "AES-256-CCM"
+	case SMB2EncryptionAES256GCM:
+		return "AES-256-GCM"
+	default:
+		return fmt.Sprintf("Unknown (0x%04X)", alg)
+	}
+}
+
+// IsSMB3EncryptedPacket checks if data looks like an SMB3 encrypted packet.
+func IsSMB3EncryptedPacket(data []byte) bool {
+	// Check for NetBIOS header + Transform signature
+	if len(data) >= 8 && data[0] == 0x00 {
+		return bytes.Equal(data[4:8], []byte{0xFD, 'S', 'M', 'B'})
+	}
+	
+	// Check for direct Transform signature
+	if len(data) >= 4 {
+		return bytes.Equal(data[0:4], []byte{0xFD, 'S', 'M', 'B'})
+	}
+	
+	return false
 }

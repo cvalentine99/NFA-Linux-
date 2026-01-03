@@ -23,6 +23,9 @@ const (
 	QUICVersion2       uint32 = 0x6b3343cf
 	QUICVersionDraft29 uint32 = 0xff00001d
 	QUICVersionDraft32 uint32 = 0xff000020
+	
+	// Version Negotiation packet has version field set to 0
+	QUICVersionNegotiation uint32 = 0x00000000
 )
 
 // QUIC packet type constants (for Long Header)
@@ -89,6 +92,10 @@ type QUICHeader struct {
 	// Packet number (decoded after header protection removal)
 	PacketNumber uint64
 	PacketNumberLen int
+	
+	// Version Negotiation specific
+	IsVersionNegotiation bool
+	SupportedVersions    []uint32
 }
 
 // QUICPacket represents a parsed QUIC packet.
@@ -312,6 +319,11 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 	header.Version = binary.BigEndian.Uint32(data[offset:])
 	offset += 4
 	
+	// Check for Version Negotiation packet (version == 0)
+	if header.Version == QUICVersionNegotiation {
+		return p.parseVersionNegotiation(data, header, offset)
+	}
+	
 	// Packet type (bits 4-5 of first byte)
 	header.PacketType = (firstByte & 0x30) >> 4
 	
@@ -371,6 +383,110 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 	offset += n
 	
 	return header, offset, nil
+}
+
+// parseVersionNegotiation parses a QUIC Version Negotiation packet.
+// Version Negotiation packets are sent by servers when they don't support the client's version.
+// Format: First byte | Version (0x00000000) | DCID Len | DCID | SCID Len | SCID | Supported Versions...
+func (p *QUICParser) parseVersionNegotiation(data []byte, header *QUICHeader, offset int) (*QUICHeader, int, error) {
+	header.IsVersionNegotiation = true
+	
+	// DCID Length (1 byte)
+	if offset >= len(data) {
+		return nil, 0, ErrPacketTooShort
+	}
+	header.DCIDLen = data[offset]
+	offset++
+	
+	// Validate DCID length (max 20 bytes per RFC 9000)
+	if header.DCIDLen > 20 {
+		return nil, 0, fmt.Errorf("QUIC: DCID length %d exceeds maximum", header.DCIDLen)
+	}
+	
+	if len(data) < offset+int(header.DCIDLen) {
+		return nil, 0, ErrPacketTooShort
+	}
+	
+	// DCID
+	header.DCID = make([]byte, header.DCIDLen)
+	copy(header.DCID, data[offset:offset+int(header.DCIDLen)])
+	offset += int(header.DCIDLen)
+	
+	// SCID Length (1 byte)
+	if offset >= len(data) {
+		return nil, 0, ErrPacketTooShort
+	}
+	header.SCIDLen = data[offset]
+	offset++
+	
+	// Validate SCID length
+	if header.SCIDLen > 20 {
+		return nil, 0, fmt.Errorf("QUIC: SCID length %d exceeds maximum", header.SCIDLen)
+	}
+	
+	if len(data) < offset+int(header.SCIDLen) {
+		return nil, 0, ErrPacketTooShort
+	}
+	
+	// SCID
+	header.SCID = make([]byte, header.SCIDLen)
+	copy(header.SCID, data[offset:offset+int(header.SCIDLen)])
+	offset += int(header.SCIDLen)
+	
+	// Parse supported versions (remaining bytes, each 4 bytes)
+	remainingBytes := len(data) - offset
+	if remainingBytes%4 != 0 {
+		return nil, 0, fmt.Errorf("QUIC: version negotiation has invalid length")
+	}
+	
+	numVersions := remainingBytes / 4
+	// Sanity check: limit to 64 versions to prevent DoS
+	if numVersions > 64 {
+		numVersions = 64
+	}
+	
+	header.SupportedVersions = make([]uint32, 0, numVersions)
+	for i := 0; i < numVersions && offset+4 <= len(data); i++ {
+		version := binary.BigEndian.Uint32(data[offset:])
+		offset += 4
+		
+		// Skip GREASE versions (0x?a?a?a?a pattern)
+		if !isGREASEVersion(version) {
+			header.SupportedVersions = append(header.SupportedVersions, version)
+		}
+	}
+	
+	return header, offset, nil
+}
+
+// isGREASEVersion checks if a QUIC version is a GREASE value.
+// GREASE versions have the pattern 0x?a?a?a?a where ? is any hex digit.
+func isGREASEVersion(v uint32) bool {
+	return (v&0x0f0f0f0f) == 0x0a0a0a0a
+}
+
+// QUICVersionName returns a human-readable name for a QUIC version.
+func QUICVersionName(v uint32) string {
+	switch v {
+	case QUICVersion1:
+		return "QUIC v1 (RFC 9000)"
+	case QUICVersion2:
+		return "QUIC v2 (RFC 9369)"
+	case QUICVersionDraft29:
+		return "QUIC draft-29"
+	case QUICVersionDraft32:
+		return "QUIC draft-32"
+	case QUICVersionNegotiation:
+		return "Version Negotiation"
+	default:
+		if isGREASEVersion(v) {
+			return "GREASE"
+		}
+		if v&0xff000000 == 0xff000000 {
+			return fmt.Sprintf("QUIC draft-%d", v&0xff)
+		}
+		return fmt.Sprintf("Unknown (0x%08x)", v)
+	}
 }
 
 // parseShortHeader parses a QUIC Short Header.
