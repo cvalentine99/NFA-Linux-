@@ -16,6 +16,8 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/reassembly"
+
+	"github.com/cvalentine99/nfa-linux/internal/metrics"
 )
 
 // MemoryConfig holds memory management configuration for the reassembly engine.
@@ -397,6 +399,9 @@ func (tr *TCPReassembler) getOrCreateStream(
 	stream.listElement = tr.streamsList.PushBack(stream)
 	atomic.AddInt64(&tr.activeStreams, 1)
 	atomic.AddUint64(&tr.stats.StreamsCreated, 1)
+	
+	// Update Prometheus metrics
+	metrics.TCPStreams.Set(float64(atomic.LoadInt64(&tr.activeStreams)))
 
 	return stream
 }
@@ -424,6 +429,9 @@ func (tr *TCPReassembler) closeStream(stream *Stream) {
 
 	atomic.AddInt64(&tr.activeStreams, -1)
 	atomic.AddUint64(&tr.stats.StreamsClosed, 1)
+	
+	// Update Prometheus metrics
+	metrics.TCPStreams.Set(float64(atomic.LoadInt64(&tr.activeStreams)))
 
 	// Call closed handler
 	if tr.closedHandler != nil {

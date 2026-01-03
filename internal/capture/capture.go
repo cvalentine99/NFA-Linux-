@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cvalentine99/nfa-linux/internal/metrics"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
@@ -237,10 +238,17 @@ func (ce *CaptureEngine) updateStats(packets, bytes uint64, dropped uint64) {
 	ce.stats.BytesReceived += bytes
 	ce.stats.PacketsDropped += dropped
 
+	// Update Prometheus metrics
+	metrics.PacketsReceived.Add(packets)
+	metrics.BytesReceived.Add(bytes)
+	metrics.PacketsDropped.Add(dropped)
+
 	elapsed := time.Since(ce.stats.StartTime).Seconds()
 	if elapsed > 0 {
 		ce.stats.PacketsPerSecond = float64(ce.stats.PacketsReceived) / elapsed
 		ce.stats.BytesPerSecond = float64(ce.stats.BytesReceived) / elapsed
+		// Update uptime gauge
+		metrics.CaptureUptime.Set(elapsed)
 	}
 }
 

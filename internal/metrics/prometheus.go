@@ -140,7 +140,12 @@ func NewGauge(opts GaugeOpts) *Gauge {
 }
 
 // Set sets the gauge to the given value.
-func (g *Gauge) Set(v int64) {
+func (g *Gauge) Set(v float64) {
+	g.value.Store(int64(v))
+}
+
+// SetInt sets the gauge to the given integer value.
+func (g *Gauge) SetInt(v int64) {
 	g.value.Store(v)
 }
 
@@ -252,6 +257,29 @@ func newHistogramValue(numBuckets int) *histogramValue {
 // Observe adds a single observation to the histogram.
 func (h *Histogram) Observe(v float64) {
 	h.value.observe(v, h.buckets)
+}
+
+// WithLabels returns a labeled histogram value.
+func (h *Histogram) WithLabels(labelValues ...string) *LabeledHistogram {
+	key := labelsKey(labelValues)
+	val, _ := h.values.LoadOrStore(key, newHistogramValue(len(h.buckets)))
+	return &LabeledHistogram{
+		histogram:   h,
+		labelValues: labelValues,
+		value:       val.(*histogramValue),
+	}
+}
+
+// LabeledHistogram is a histogram with specific label values.
+type LabeledHistogram struct {
+	histogram   *Histogram
+	labelValues []string
+	value       *histogramValue
+}
+
+// Observe adds a single observation to the labeled histogram.
+func (lh *LabeledHistogram) Observe(v float64) {
+	lh.value.observe(v, lh.histogram.buckets)
 }
 
 func (hv *histogramValue) observe(v float64, buckets []float64) {

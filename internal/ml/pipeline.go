@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cvalentine99/nfa-linux/internal/metrics"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
@@ -308,7 +309,10 @@ func (p *MLPipeline) analyzeFlow(flow *models.Flow) *MLResult {
 
 	// Anomaly detection
 	if p.config.EnableAnomalyDetection {
+		anomalyStart := time.Now()
 		anomalyResult, err := p.anomalyDetector.Detect(p.ctx, featureSlice)
+		metrics.MLInferenceLatency.WithLabels("anomaly").Observe(time.Since(anomalyStart).Seconds())
+		metrics.MLInferences.WithLabels("anomaly").Inc()
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("anomaly detection: %v", err))
 		} else {
@@ -317,6 +321,7 @@ func (p *MLPipeline) analyzeFlow(flow *models.Flow) *MLResult {
 				p.mu.Lock()
 				p.stats.AnomaliesDetected++
 				p.mu.Unlock()
+				metrics.AlertsGenerated.WithLabels("anomaly").Inc()
 			}
 		}
 	}
@@ -333,7 +338,10 @@ func (p *MLPipeline) analyzeFlow(flow *models.Flow) *MLResult {
 
 	// Threat detection
 	if p.config.EnableThreatDetection {
+		threatStart := time.Now()
 		threatResult, err := p.threatClassifier.Classify(p.ctx, flow)
+		metrics.MLInferenceLatency.WithLabels("threat").Observe(time.Since(threatStart).Seconds())
+		metrics.MLInferences.WithLabels("threat").Inc()
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("threat detection: %v", err))
 		} else {
@@ -342,6 +350,7 @@ func (p *MLPipeline) analyzeFlow(flow *models.Flow) *MLResult {
 				p.mu.Lock()
 				p.stats.ThreatsDetected++
 				p.mu.Unlock()
+				metrics.AlertsGenerated.WithLabels("threat").Inc()
 			}
 		}
 	}

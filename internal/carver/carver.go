@@ -24,6 +24,7 @@ import (
 	"github.com/zeebo/blake3"
 
 	"github.com/cvalentine99/nfa-linux/internal/config"
+	"github.com/cvalentine99/nfa-linux/internal/metrics"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
@@ -340,6 +341,8 @@ func (fc *FileCarver) extractFile(
 
 	// Update statistics
 	fc.updateStats(category)
+	atomic.AddUint64(&fc.stats.BytesCarved, uint64(len(data)))
+	metrics.CarvedBytes.Add(uint64(len(data)))
 
 	// Check for threats
 	if fc.isThreat(mtype.String(), data) {
@@ -544,6 +547,9 @@ func (fc *FileCarver) shouldExtract(category string) bool {
 // updateStats updates carving statistics.
 func (fc *FileCarver) updateStats(category string) {
 	atomic.AddUint64(&fc.stats.FilesCarved, 1)
+	
+	// Update Prometheus metrics
+	metrics.FilesCarved.WithLabels(category).Inc()
 
 	switch category {
 	case "executable":

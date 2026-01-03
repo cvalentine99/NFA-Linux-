@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,9 +27,10 @@ import (
 	"github.com/cvalentine99/nfa-linux/internal/capture"
 	"github.com/cvalentine99/nfa-linux/internal/carver"
 	"github.com/cvalentine99/nfa-linux/internal/evidence"
+	"github.com/cvalentine99/nfa-linux/internal/logging"
+	"github.com/cvalentine99/nfa-linux/internal/metrics"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 	"github.com/cvalentine99/nfa-linux/internal/parser"
-	"github.com/cvalentine99/nfa-linux/internal/logging"
 	"github.com/cvalentine99/nfa-linux/internal/reassembly"
 )
 
@@ -54,6 +56,7 @@ var (
 	flagDuration   = flag.Duration("duration", 0, "Capture duration (0 for unlimited)")
 	flagExportJSON = flag.Bool("export-json", true, "Export results as JSON")
 	flagExportCASE = flag.Bool("export-case", false, "Export results in CASE/UCO format")
+	flagMetricsPort = flag.Int("metrics-port", 9090, "Port for Prometheus metrics endpoint (0 to disable)")
 )
 
 func main() {
@@ -83,6 +86,11 @@ func main() {
 	// Create application context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Start Prometheus metrics server if enabled
+	if *flagMetricsPort > 0 {
+		go startMetricsServer(*flagMetricsPort)
+	}
 
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
@@ -652,5 +660,44 @@ func (a *App) GetSystemInfo() map[string]interface{} {
 		"arch":       runtime.GOARCH,
 		"numCPU":     runtime.NumCPU(),
 		"gomaxprocs": runtime.GOMAXPROCS(0),
+	}
+}
+
+// startMetricsServer starts the Prometheus metrics HTTP server.
+func startMetricsServer(port int) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	addr := fmt.Sprintf(":%d", port)
+	logging.Infof("Starting metrics server on %s", addr)
+
+	// Start system metrics updater
+	go updateSystemMetrics()
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logging.Warnf("Metrics server error: %v", err)
+	}
+}
+
+// updateSystemMetrics periodically updates system-level metrics.
+func updateSystemMetrics() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+
+		metrics.MemoryUsage.Set(float64(m.Alloc))
+		metrics.GoroutineCount.Set(float64(runtime.NumGoroutine()))
 	}
 }
