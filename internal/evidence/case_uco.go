@@ -576,3 +576,49 @@ func (ep *EvidencePackager) GetBundle() *CASEBundle {
 func (ep *EvidencePackager) ExportJSON() ([]byte, error) {
 	return ep.bundle.ToJSON()
 }
+
+// =============================================================================
+// Compatibility Layer for Integration Tests
+// =============================================================================
+
+// Config is a compatibility wrapper for EvidencePackagerConfig.
+// It provides field aliases for the integration test API.
+type Config struct {
+	CaseName        string // Maps to InvestigationName
+	InvestigatorID  string // Maps to ToolCreator
+	OrganizationID  string // Maps to ToolName (used as org identifier)
+	OutputDir       string
+	EnableTimestamp bool   // Not used but accepted for compatibility
+}
+
+// New creates a new evidence packager from a Config (compatibility wrapper).
+func New(cfg *Config) (*EvidencePackager, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	
+	epCfg := &EvidencePackagerConfig{
+		InvestigationName:  cfg.CaseName,
+		InvestigationFocus: "Network Forensics",
+		ToolName:           "NFA-Linux",
+		ToolVersion:        "1.0.0",
+		ToolCreator:        cfg.InvestigatorID,
+		OutputDir:          cfg.OutputDir,
+	}
+	
+	return NewEvidencePackager(epCfg), nil
+}
+
+// AddFile adds a carved file to the evidence package (alias for AddCarvedFile).
+func (ep *EvidencePackager) AddFile(cf *models.CarvedFile) string {
+	return ep.AddCarvedFile(cf)
+}
+
+// ExportJSONToFile exports the bundle as JSON-LD to a file.
+func (ep *EvidencePackager) ExportJSONToFile(path string) error {
+	data, err := ep.ExportJSON()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}

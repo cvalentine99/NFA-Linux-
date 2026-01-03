@@ -46,6 +46,11 @@ type MemoryConfig struct {
 	// PageSize is the size of each memory page.
 	// Default: 2048 bytes
 	PageSize int
+	
+	// FlushInterval is the interval for flushing old connections.
+	// Compatibility alias for FlushOlderThan.
+	// Default: 30 seconds
+	FlushInterval time.Duration
 }
 
 // DefaultMemoryConfig returns a sensible default memory configuration.
@@ -80,6 +85,10 @@ type Stream struct {
 	State         string
 	Protocol      string // Detected application protocol
 	
+	// Accumulated stream data (for StreamCompleteHandler)
+	clientData    []byte
+	serverData    []byte
+	
 	// Internal state
 	mu            sync.Mutex
 	bufferedPages int
@@ -104,9 +113,13 @@ func (s *Stream) GetUserData() interface{} {
 
 // TCPReassembler provides memory-safe TCP stream reassembly.
 type TCPReassembler struct {
-	config        *MemoryConfig
-	streamHandler StreamHandler
-	closedHandler StreamClosedHandler
+	config                *MemoryConfig
+	streamHandler         StreamHandler
+	closedHandler         StreamClosedHandler
+	streamCompleteHandler StreamCompleteHandler
+	
+	// Mutex for handler access
+	mu sync.RWMutex
 	
 	// gopacket assembler
 	streamFactory *tcpStreamFactory
@@ -161,6 +174,16 @@ type tcpStream struct {
 func NewTCPReassembler(cfg *MemoryConfig) (*TCPReassembler, error) {
 	if cfg == nil {
 		cfg = DefaultMemoryConfig()
+	}
+	
+	// Handle FlushInterval alias for FlushOlderThan
+	if cfg.FlushInterval > 0 && cfg.FlushOlderThan == 0 {
+		cfg.FlushOlderThan = cfg.FlushInterval
+	}
+	
+	// Ensure FlushOlderThan has a valid value to prevent panic in NewTicker
+	if cfg.FlushOlderThan <= 0 {
+		cfg.FlushOlderThan = 30 * time.Second
 	}
 
 	tr := &TCPReassembler{
@@ -437,6 +460,14 @@ func (tr *TCPReassembler) closeStream(stream *Stream) {
 	if tr.closedHandler != nil {
 		tr.closedHandler(stream)
 	}
+	
+	// Call stream complete handler (provides accumulated data)
+	tr.mu.RLock()
+	completeHandler := tr.streamCompleteHandler
+	tr.mu.RUnlock()
+	if completeHandler != nil {
+		completeHandler(stream)
+	}
 }
 
 // assemblerContext provides context for the gopacket assembler.
@@ -529,8 +560,12 @@ func (s *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 	// Update statistics
 	if s.isClient {
 		atomic.AddUint64(&s.stream.ClientBytes, uint64(length))
+		// Accumulate client data for streamCompleteHandler
+		s.stream.appendClientData(data)
 	} else {
 		atomic.AddUint64(&s.stream.ServerBytes, uint64(length))
+		// Accumulate server data for streamCompleteHandler
+		s.stream.appendServerData(data)
 	}
 	atomic.AddUint64(&s.reassembler.stats.BytesReassembled, uint64(length))
 
@@ -544,4 +579,55 @@ func (s *tcpStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 func (s *tcpStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
 	s.reassembler.closeStream(s.stream)
 	return true // Remove from pool
+}
+
+// =============================================================================
+// Compatibility Layer for Integration Tests
+// =============================================================================
+
+// Config is an alias for MemoryConfig for API compatibility.
+type Config = MemoryConfig
+
+// New creates a new TCP reassembler (alias for NewTCPReassembler).
+func New(cfg *Config) (*TCPReassembler, error) {
+	return NewTCPReassembler(cfg)
+}
+
+// StreamCompleteHandler is called when a stream is fully reassembled.
+type StreamCompleteHandler func(stream *Stream)
+
+// SetStreamCompleteHandler sets a handler for completed streams.
+// This is an alternative to SetStreamHandler that provides accumulated data.
+func (tr *TCPReassembler) SetStreamCompleteHandler(handler StreamCompleteHandler) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.streamCompleteHandler = handler
+}
+
+// GetClientData returns accumulated client-to-server data for the stream.
+func (s *Stream) GetClientData() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientData
+}
+
+// GetServerData returns accumulated server-to-client data for the stream.
+func (s *Stream) GetServerData() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serverData
+}
+
+// appendClientData appends data to the client data buffer.
+func (s *Stream) appendClientData(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clientData = append(s.clientData, data...)
+}
+
+// appendServerData appends data to the server data buffer.
+func (s *Stream) appendServerData(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.serverData = append(s.serverData, data...)
 }

@@ -703,3 +703,63 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// =============================================================================
+// Compatibility Layer for Integration Tests
+// =============================================================================
+
+// Config is an alias for CarverConfig for API compatibility.
+type Config = CarverConfig
+
+// New creates a new file carver (alias for NewFileCarver).
+func New(cfg *Config) (*FileCarver, error) {
+	return NewFileCarver(cfg)
+}
+
+// CarvedFileResult represents a carved file result for the Carve method.
+type CarvedFileResult struct {
+	Filename string
+	MimeType string
+	Size     int64
+	Hash     string
+	Path     string
+}
+
+// Carve extracts files from raw data and returns the results.
+// This is a simplified API for integration testing.
+func (fc *FileCarver) Carve(data []byte, srcIP, dstIP string) ([]*CarvedFileResult, error) {
+	streamID := fmt.Sprintf("%s-%s-%d", srcIP, dstIP, time.Now().UnixNano())
+	
+	var results []*CarvedFileResult
+	var resultsMu sync.Mutex
+	
+	// Set up handler to capture results
+	fc.mu.Lock()
+	originalHandler := fc.onFileCarved
+	fc.mu.Unlock()
+	
+	fc.SetFileCarvedHandler(func(cf *models.CarvedFile) {
+		resultsMu.Lock()
+		results = append(results, &CarvedFileResult{
+			Filename: cf.Filename,
+			MimeType: cf.MimeType,
+			Size:     cf.Size,
+			Hash:     cf.Hash,
+			Path:     cf.FilePath,
+		})
+		resultsMu.Unlock()
+		// Also call original handler if set
+		if originalHandler != nil {
+			originalHandler(cf)
+		}
+	})
+	
+	// Carve from the data
+	_ = streamID // unused but kept for potential future use
+	_, err := fc.CarveFromStream(data, srcIP, dstIP, 0, 0, time.Now().UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	
+	return results, nil
+}

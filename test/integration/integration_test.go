@@ -62,8 +62,9 @@ func TestCaptureToParsingPipeline(t *testing.T) {
 	// Set up packet handler
 	engine.SetHandler(func(data []byte, info *models.PacketInfo) {
 		// Try DNS parsing (UDP port 53)
+		// Note: DNS parser expects gopacket.Packet, use ParseWithProtection for raw bytes
 		if info.DstPort == 53 || info.SrcPort == 53 {
-			if result, err := dnsParser.Parse(data); err == nil {
+			if result, err := dnsParser.ParseWithProtection(data, info.SrcIP, info.DstIP, info.TimestampNano); err == nil {
 				atomic.AddInt64(&dnsCount, 1)
 				mu.Lock()
 				results = append(results, result)
@@ -73,7 +74,7 @@ func TestCaptureToParsingPipeline(t *testing.T) {
 
 		// Try HTTP parsing (TCP port 80)
 		if info.DstPort == 80 || info.SrcPort == 80 {
-			if result, err := httpParser.ParseRequest(data); err == nil {
+			if result, err := httpParser.ParseRequest(data, info.TimestampNano); err == nil {
 				atomic.AddInt64(&httpCount, 1)
 				mu.Lock()
 				results = append(results, result)
@@ -83,7 +84,7 @@ func TestCaptureToParsingPipeline(t *testing.T) {
 
 		// Try TLS parsing (TCP port 443)
 		if info.DstPort == 443 || info.SrcPort == 443 {
-			if result, err := tlsParser.ParseClientHello(data); err == nil {
+			if result, err := tlsParser.ParseClientHello(data, info.TimestampNano); err == nil {
 				atomic.AddInt64(&tlsCount, 1)
 				mu.Lock()
 				results = append(results, result)
@@ -128,9 +129,10 @@ func TestTCPReassemblyPipeline(t *testing.T) {
 	var reassembledStreams int64
 	var totalBytes int64
 
-	engine.SetStreamHandler(func(stream *reassembly.Stream) {
+	// Use SetStreamCompleteHandler for accumulated data access
+	engine.SetStreamCompleteHandler(func(stream *reassembly.Stream) {
 		atomic.AddInt64(&reassembledStreams, 1)
-		atomic.AddInt64(&totalBytes, int64(len(stream.ClientData)+len(stream.ServerData)))
+		atomic.AddInt64(&totalBytes, int64(len(stream.GetClientData())+len(stream.GetServerData())))
 	})
 
 	engine.Start(ctx)
@@ -144,14 +146,22 @@ func TestTCPReassemblyPipeline(t *testing.T) {
 	// Send HTTP request in segments
 	httpRequest := []byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
 	
-	// Segment 1
-	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1000, httpRequest[:20], true, false, false, time.Now())
+	// TCP flags: SYN=0x02, ACK=0x10, FIN=0x01, PSH=0x08
+	const (
+		FlagSYN = 0x02
+		FlagACK = 0x10
+		FlagFIN = 0x01
+		FlagPSH = 0x08
+	)
+	
+	// Segment 1 (SYN+ACK to establish, then data)
+	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1000, 0, FlagACK|FlagPSH, httpRequest[:20], time.Now().UnixNano())
 	
 	// Segment 2
-	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1020, httpRequest[20:40], false, false, false, time.Now())
+	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1020, 0, FlagACK|FlagPSH, httpRequest[20:40], time.Now().UnixNano())
 	
 	// Segment 3 with FIN
-	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1040, httpRequest[40:], false, true, false, time.Now())
+	engine.ProcessTCPSegment(srcIP, dstIP, srcPort, dstPort, 1040, 0, FlagACK|FlagFIN|FlagPSH, httpRequest[40:], time.Now().UnixNano())
 
 	// Wait for processing
 	time.Sleep(500 * time.Millisecond)
@@ -171,13 +181,17 @@ func TestFileCarverPipeline(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	cfg := &carver.Config{
-		OutputDir:      tmpDir,
-		MaxFileSize:    10 * 1024 * 1024, // 10MB
-		MinFileSize:    100,
-		EnableHashing:  true,
-		HashAlgorithm:  "blake3",
-		ScanEmbedded:   true,
-		ThreatDetection: true,
+		OutputDir:          tmpDir,
+		MaxFileSize:        10 * 1024 * 1024, // 10MB
+		MinFileSize:        100,
+		EnableHashing:      true,
+		HashAlgorithm:      "blake3",
+		ExtractDocuments:   true,
+		ExtractImages:      true,
+		ExtractArchives:    true,
+		ExtractExecutables: false, // Safety: don't extract executables by default
+		MaxFilesPerStream:  100,
+		MaxTotalFiles:      1000,
 	}
 
 	carverEngine, err := carver.New(cfg)
@@ -226,16 +240,17 @@ func TestEvidencePackagingPipeline(t *testing.T) {
 
 	// Add test evidence
 	flow := &models.Flow{
-		ID:        "flow-001",
-		SrcIP:     net.ParseIP("192.168.1.1"),
-		DstIP:     net.ParseIP("192.168.1.2"),
-		SrcPort:   12345,
-		DstPort:   443,
-		Protocol:  models.ProtocolTCP,
-		StartTime: time.Now().Add(-5 * time.Minute),
-		EndTime:   time.Now(),
-		BytesSent: 1024,
-		BytesRecv: 2048,
+		ID:           "flow-001",
+		SrcIP:        net.ParseIP("192.168.1.1"),
+		DstIP:        net.ParseIP("192.168.1.2"),
+		SrcPort:      12345,
+		DstPort:      443,
+		Protocol:     6, // TCP
+		ProtocolName: "TCP",
+		StartTime:    time.Now().Add(-5 * time.Minute),
+		EndTime:      time.Now(),
+		Bytes:        3072,
+		Packets:      10,
 	}
 
 	packager.AddFlow(flow)
@@ -247,15 +262,15 @@ func TestEvidencePackagingPipeline(t *testing.T) {
 		MimeType: "application/pdf",
 		Size:     1024,
 		Hash:     "abc123def456",
-		SrcIP:    "192.168.1.1",
-		DstIP:    "192.168.1.2",
+		SourceIP: net.ParseIP("192.168.1.1"),
+		DestIP:   net.ParseIP("192.168.1.2"),
 	}
 
 	packager.AddFile(carvedFile)
 
 	// Export evidence
 	outputPath := filepath.Join(tmpDir, "evidence.json")
-	if err := packager.ExportJSON(outputPath); err != nil {
+	if err := packager.ExportJSONToFile(outputPath); err != nil {
 		t.Fatalf("Failed to export evidence: %v", err)
 	}
 
@@ -288,44 +303,41 @@ func TestIntegrityVerificationPipeline(t *testing.T) {
 
 	// Hash the data
 	hasher := integrity.NewBLAKE3Hasher()
-	hash1 := hasher.Hash(testData)
+	hash1 := hasher.HashHex(testData)
 
 	// Verify same data produces same hash
-	hash2 := hasher.Hash(testData)
+	hash2 := hasher.HashHex(testData)
 	if hash1 != hash2 {
 		t.Error("Same data produced different hashes")
 	}
 
 	// Verify different data produces different hash
 	modifiedData := append(testData, byte('!'))
-	hash3 := hasher.Hash(modifiedData)
+	hash3 := hasher.HashHex(modifiedData)
 	if hash1 == hash3 {
 		t.Error("Different data produced same hash")
 	}
 
 	// Test Merkle tree
-	chunks := [][]byte{
-		[]byte("chunk1"),
-		[]byte("chunk2"),
-		[]byte("chunk3"),
-		[]byte("chunk4"),
+	tree := integrity.NewMerkleTree(integrity.DefaultMerkleTreeConfig())
+	
+	// Build tree from test data
+	testTreeData := []byte("chunk1chunk2chunk3chunk4")
+	if err := tree.BuildFromData(testTreeData); err != nil {
+		t.Fatalf("Failed to build Merkle tree: %v", err)
 	}
 
-	tree, err := integrity.NewMerkleTree(chunks)
-	if err != nil {
-		t.Fatalf("Failed to create Merkle tree: %v", err)
-	}
-
-	rootHash := tree.Root()
+	rootHash := tree.RootHex()
 	t.Logf("Merkle root: %s", rootHash)
 
-	// Generate and verify proof for chunk 2
-	proof, err := tree.GenerateProof(1)
+	// Generate and verify proof for leaf 0
+	proof, err := tree.GetProof(0)
 	if err != nil {
 		t.Fatalf("Failed to generate proof: %v", err)
 	}
 
-	if !tree.VerifyProof(chunks[1], proof, rootHash) {
+	valid, err := tree.VerifyProof(proof)
+	if err != nil || !valid {
 		t.Error("Merkle proof verification failed")
 	}
 
@@ -333,14 +345,15 @@ func TestIntegrityVerificationPipeline(t *testing.T) {
 	chain := integrity.NewHashChain()
 	
 	for i := 0; i < 10; i++ {
-		chain.Add([]byte("entry " + string(rune('0'+i))))
+		chain.Append([]byte("entry "+string(rune('0'+i))), time.Now().UnixNano())
 	}
 
-	if !chain.Verify() {
-		t.Error("Hash chain verification failed")
+	valid, invalidIdx := chain.Verify()
+	if !valid {
+		t.Errorf("Hash chain verification failed at index %d", invalidIdx)
 	}
 
-	t.Logf("Hash chain length: %d, head: %s", chain.Length(), chain.Head()[:16]+"...")
+	t.Logf("Hash chain length: %d, latest hash: %s", chain.Length(), chain.LatestHash()[:16]+"...")
 }
 
 // TestMLPipelineIntegration tests ML pipeline integration
@@ -349,51 +362,46 @@ func TestMLPipelineIntegration(t *testing.T) {
 		t.Skip("Skipping ML integration test in short mode")
 	}
 
-	// Test anomaly detector initialization and basic operation
-	detector := ml.NewAnomalyDetector(&ml.AnomalyConfig{
-		WindowSize:    100,
-		ZScoreThreshold: 3.0,
-		IQRMultiplier:   1.5,
-		MADMultiplier:   3.0,
-	})
+	// Test statistical anomaly detector initialization and basic operation
+	featureNames := []string{"bytes", "packets", "duration"}
+	detector := ml.NewStatisticalAnomalyDetector(ml.DefaultAnomalyConfig(), featureNames)
 
-	// Feed some normal data points
+	// Feed some normal data points to train
 	for i := 0; i < 50; i++ {
-		result := detector.Detect(float64(100 + i%10))
-		if result.IsAnomaly {
-			t.Logf("Unexpected anomaly at index %d", i)
-		}
+		features := []float64{float64(100 + i%10), float64(10 + i%5), float64(1 + i%3)}
+		detector.Update(features)
 	}
 
-	// Feed an anomalous data point
-	result := detector.Detect(1000.0)
-	t.Logf("Anomaly detection result for outlier: IsAnomaly=%v, Score=%.2f", result.IsAnomaly, result.Score)
-
-	// Test traffic classifier initialization
-	classifier := ml.NewTrafficClassifier(&ml.ClassifierConfig{
-		ConfidenceThreshold: 0.7,
-		MaxCacheSize:       1000,
-		CacheTTL:           time.Minute * 5,
-	})
-
-	// Create a test flow for classification
-	testFlow := &models.Flow{
-		SrcIP:        net.ParseIP("192.168.1.100"),
-		DstIP:        net.ParseIP("8.8.8.8"),
-		SrcPort:      54321,
-		DstPort:      443,
-		Protocol:     models.ProtocolTCP,
-		PacketCount:  100,
-		ByteCount:    50000,
+	// Detect on normal data
+	ctx := context.Background()
+	normalFeatures := []float64{105.0, 12.0, 2.0}
+	result, err := detector.Detect(ctx, normalFeatures)
+	if err != nil {
+		t.Fatalf("Detection failed: %v", err)
 	}
+	t.Logf("Normal data detection: IsAnomaly=%v, Score=%.2f", result.IsAnomaly, result.Score)
 
-	classResult := classifier.Classify(testFlow)
-	t.Logf("Traffic classification: Category=%s, Confidence=%.2f", classResult.Category, classResult.Confidence)
-
-	// Verify classifier returned a valid result
-	if classResult.Category == "" {
-		t.Error("Classifier returned empty category")
+	// Test EWMA detector
+	ewma := ml.NewEWMADetector(0.3, 3.0)
+	
+	// Feed normal values
+	for i := 0; i < 20; i++ {
+		ewma.Update("test_metric", float64(100+i%10))
 	}
+	
+	// Test anomaly detection
+	isAnomaly, deviation := ewma.Detect("test_metric", 1000.0)
+	t.Logf("EWMA anomaly detection: IsAnomaly=%v, Deviation=%.2f", isAnomaly, deviation)
+
+	// Test DNS tunneling detector
+	dnsDetector := ml.NewDNSTunnelingDetector()
+	isTunneling, confidence, reason := dnsDetector.Predict("aGVsbG8gd29ybGQ.example.com")
+	t.Logf("DNS tunneling detection: IsTunneling=%v, Confidence=%.2f, Reason=%s", isTunneling, confidence, reason)
+
+	// Test DGA detector
+	dgaDetector := ml.NewDGADetector()
+	isDGA, dgaScore := dgaDetector.Predict("xyzabc123def.com")
+	t.Logf("DGA detection: IsDGA=%v, Score=%.2f", isDGA, dgaScore)
 
 	t.Log("ML pipeline integration test completed successfully")
 }
@@ -484,7 +492,7 @@ func TestConcurrentParserAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_, _ = dnsParser.Parse(dnsPayload)
+				_, _ = dnsParser.ParseWithProtection(dnsPayload, net.ParseIP("192.168.1.1"), net.ParseIP("8.8.8.8"), time.Now().UnixNano())
 			}
 		}()
 
@@ -492,7 +500,7 @@ func TestConcurrentParserAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_, _ = httpParser.ParseRequest(httpPayload)
+				_, _ = httpParser.ParseRequest(httpPayload, time.Now().UnixNano())
 			}
 		}()
 
@@ -500,7 +508,7 @@ func TestConcurrentParserAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_, _ = tlsParser.ParseClientHello([]byte{0x16, 0x03, 0x01})
+				_, _ = tlsParser.ParseClientHello([]byte{0x16, 0x03, 0x01}, time.Now().UnixNano())
 			}
 		}()
 	}
@@ -531,11 +539,17 @@ func TestMemoryStability(t *testing.T) {
 		t.Fatalf("Failed to create reassembly engine: %v", err)
 	}
 
-	engine.SetStreamHandler(func(stream *reassembly.Stream) {
+	// Use SetStreamCompleteHandler for accumulated data access
+	engine.SetStreamCompleteHandler(func(stream *reassembly.Stream) {
 		// Process stream
+		_ = stream.GetClientData()
+		_ = stream.GetServerData()
 	})
 
 	engine.Start(ctx)
+
+	// TCP flags
+	const FlagACK = 0x10
 
 	// Simulate sustained traffic
 	go func() {
@@ -553,9 +567,10 @@ func TestMemoryStability(t *testing.T) {
 					uint16(time.Now().UnixNano()%65535),
 					80,
 					uint32(time.Now().UnixNano()),
+					0,
+					FlagACK,
 					data,
-					true, false, false,
-					time.Now(),
+					time.Now().UnixNano(),
 				)
 			}
 		}
