@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
+	"github.com/cvalentine99/nfa-linux/internal/privacy"
 )
 
 // BUG-3 FIX: Constants for pending request management
@@ -33,6 +34,7 @@ type HTTPParser struct {
 	onResponse    func(*HTTPResponse)
 	onCredential  func(*models.Credential)
 	onFile        func(*HTTPFile)
+	onPII         func(*PIIFinding) // PII detection callback
 
 	// State
 	buffer        bytes.Buffer
@@ -40,6 +42,18 @@ type HTTPParser struct {
 	
 	// BUG-3 FIX: Track pending request count for memory management
 	lastCleanup   time.Time
+	
+	// PII detection
+	piiDetector   *privacy.Detector
+	piiEnabled    bool
+}
+
+// PIIFinding represents PII detected in HTTP traffic.
+type PIIFinding struct {
+	Source      string           // "header", "body", "url", "cookie"
+	Field       string           // Header name, URL parameter, etc.
+	Matches     []privacy.PIIMatch
+	Timestamp   int64
 }
 
 // HTTPRequest represents a parsed HTTP request.
@@ -91,6 +105,17 @@ func (p *HTTPParser) SetRequestHandler(handler func(*HTTPRequest)) {
 // SetResponseHandler sets the callback for HTTP responses.
 func (p *HTTPParser) SetResponseHandler(handler func(*HTTPResponse)) {
 	p.onResponse = handler
+}
+
+// SetPIIHandler sets the callback for PII findings.
+func (p *HTTPParser) SetPIIHandler(handler func(*PIIFinding)) {
+	p.onPII = handler
+}
+
+// EnablePIIDetection enables PII scanning with the given detector.
+func (p *HTTPParser) EnablePIIDetection(detector *privacy.Detector) {
+	p.piiDetector = detector
+	p.piiEnabled = detector != nil
 }
 
 // SetCredentialHandler sets the callback for extracted credentials.
@@ -152,11 +177,82 @@ func (p *HTTPParser) ParseRequest(data []byte, timestampNano int64) (*HTTPReques
 		p.pendingReqs = append(p.pendingReqs[1:], httpReq)
 	}
 
+	// Scan for PII if enabled
+	if p.piiEnabled && p.piiDetector != nil {
+		p.scanRequestForPII(httpReq)
+	}
+
 	if p.onRequest != nil {
 		p.onRequest(httpReq)
 	}
 
 	return httpReq, nil
+}
+
+// scanRequestForPII scans HTTP request for PII.
+func (p *HTTPParser) scanRequestForPII(req *HTTPRequest) {
+	if p.onPII == nil {
+		return
+	}
+
+	// Scan URL query parameters
+	if req.URL != nil && req.URL.RawQuery != "" {
+		matches := p.piiDetector.Detect(req.URL.RawQuery)
+		if len(matches) > 0 {
+			p.onPII(&PIIFinding{
+				Source:    "url",
+				Field:     "query",
+				Matches:   matches,
+				Timestamp: req.TimestampNano,
+			})
+		}
+	}
+
+	// Scan sensitive headers
+	sensitiveHeaders := []string{
+		"Authorization", "Cookie", "X-Api-Key", "X-Auth-Token",
+		"X-Access-Token", "X-Forwarded-For", "X-Real-IP",
+	}
+	for _, header := range sensitiveHeaders {
+		if val := req.Headers.Get(header); val != "" {
+			matches := p.piiDetector.Detect(val)
+			if len(matches) > 0 {
+				p.onPII(&PIIFinding{
+					Source:    "header",
+					Field:     header,
+					Matches:   matches,
+					Timestamp: req.TimestampNano,
+				})
+			}
+		}
+	}
+
+	// Scan body for PII (only text content types)
+	if len(req.Body) > 0 && isTextContentType(req.ContentType) {
+		matches := p.piiDetector.Detect(string(req.Body))
+		if len(matches) > 0 {
+			p.onPII(&PIIFinding{
+				Source:    "body",
+				Field:     req.ContentType,
+				Matches:   matches,
+				Timestamp: req.TimestampNano,
+			})
+		}
+	}
+}
+
+// isTextContentType checks if content type is text-based.
+func isTextContentType(ct string) bool {
+	textTypes := []string{
+		"text/", "application/json", "application/xml",
+		"application/x-www-form-urlencoded", "multipart/form-data",
+	}
+	for _, t := range textTypes {
+		if strings.Contains(ct, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupOldPendingRequests removes requests older than PendingRequestTimeout

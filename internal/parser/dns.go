@@ -12,6 +12,7 @@ import (
 	"github.com/gopacket/gopacket/layers"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
+	"github.com/cvalentine99/nfa-linux/internal/privacy"
 )
 
 const (
@@ -28,8 +29,22 @@ const (
 type DNSParser struct {
 	// Callback for DNS records
 	onRecord func(*models.DNSRecord)
+	// Callback for PII findings
+	onPII func(*DNSPIIFinding)
 	// MaxLabelDepth limits recursion for compression pointer following
 	MaxLabelDepth int
+	// PII detection
+	piiDetector *privacy.Detector
+	piiEnabled  bool
+}
+
+// DNSPIIFinding represents PII detected in DNS traffic.
+type DNSPIIFinding struct {
+	QueryName   string
+	Matches     []privacy.PIIMatch
+	Timestamp   int64
+	SrcIP       net.IP
+	DstIP       net.IP
 }
 
 // NewDNSParser creates a new DNS parser.
@@ -42,6 +57,17 @@ func NewDNSParser() *DNSParser {
 // SetRecordHandler sets the callback for DNS records.
 func (p *DNSParser) SetRecordHandler(handler func(*models.DNSRecord)) {
 	p.onRecord = handler
+}
+
+// SetPIIHandler sets the callback for PII findings.
+func (p *DNSParser) SetPIIHandler(handler func(*DNSPIIFinding)) {
+	p.onPII = handler
+}
+
+// EnablePIIDetection enables PII scanning with the given detector.
+func (p *DNSParser) EnablePIIDetection(detector *privacy.Detector) {
+	p.piiDetector = detector
+	p.piiEnabled = detector != nil
 }
 
 // Parse parses a DNS packet and extracts records.
@@ -95,12 +121,49 @@ func (p *DNSParser) Parse(packet gopacket.Packet) ([]*models.DNSRecord, error) {
 
 		records = append(records, record)
 
+		// Scan for PII in query name (e.g., email in subdomain)
+		if p.piiEnabled && p.piiDetector != nil {
+			p.scanDNSForPII(string(q.Name), timestamp, srcIP, dstIP)
+		}
+
 		if p.onRecord != nil {
 			p.onRecord(record)
 		}
 	}
 
 	return records, nil
+}
+
+// scanDNSForPII scans DNS query names for PII.
+// This detects data exfiltration via DNS tunneling (e.g., email.base64data.evil.com)
+func (p *DNSParser) scanDNSForPII(queryName string, timestamp int64, srcIP, dstIP net.IP) {
+	if p.onPII == nil {
+		return
+	}
+
+	// Check the full query name
+	matches := p.piiDetector.Detect(queryName)
+	
+	// Also check each subdomain label separately (for encoded data)
+	labels := strings.Split(queryName, ".")
+	for _, label := range labels {
+		// Skip short labels and TLDs
+		if len(label) < 10 {
+			continue
+		}
+		labelMatches := p.piiDetector.Detect(label)
+		matches = append(matches, labelMatches...)
+	}
+
+	if len(matches) > 0 {
+		p.onPII(&DNSPIIFinding{
+			QueryName: queryName,
+			Matches:   matches,
+			Timestamp: timestamp,
+			SrcIP:     srcIP,
+			DstIP:     dstIP,
+		})
+	}
 }
 
 // ParseFromLayers parses DNS from pre-decoded layers.

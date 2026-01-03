@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
+	"github.com/cvalentine99/nfa-linux/internal/privacy"
 )
 
 // CASE/UCO namespace URIs
@@ -402,16 +403,25 @@ type EvidencePackager struct {
 	tool          *Tool
 	outputDir     string
 	mu            sync.Mutex
+	
+	// PII redaction
+	piiDetector   *privacy.Detector
+	piiEnabled    bool
+	piiMode       privacy.RedactionMode
 }
 
 // EvidencePackagerConfig holds configuration for the evidence packager.
 type EvidencePackagerConfig struct {
-	InvestigationName string
+	InvestigationName  string
 	InvestigationFocus string
-	ToolName          string
-	ToolVersion       string
-	ToolCreator       string
-	OutputDir         string
+	ToolName           string
+	ToolVersion        string
+	ToolCreator        string
+	OutputDir          string
+	
+	// PII redaction options
+	EnablePIIRedaction bool
+	PIIRedactionMode   privacy.RedactionMode
 }
 
 // NewEvidencePackager creates a new evidence packager.
@@ -424,12 +434,38 @@ func NewEvidencePackager(cfg *EvidencePackagerConfig) *EvidencePackager {
 	bundle.AddObject(investigation)
 	bundle.AddObject(tool)
 
-	return &EvidencePackager{
+	ep := &EvidencePackager{
 		bundle:        bundle,
 		investigation: investigation,
 		tool:          tool,
 		outputDir:     cfg.OutputDir,
 	}
+
+	// Initialize PII redaction if enabled
+	if cfg.EnablePIIRedaction {
+		ep.piiDetector = privacy.NewDetector(privacy.DefaultConfig())
+		ep.piiEnabled = true
+		ep.piiMode = cfg.PIIRedactionMode
+	}
+
+	return ep
+}
+
+// EnablePIIRedaction enables PII redaction with the given detector.
+func (ep *EvidencePackager) EnablePIIRedaction(detector *privacy.Detector, mode privacy.RedactionMode) {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	ep.piiDetector = detector
+	ep.piiEnabled = detector != nil
+	ep.piiMode = mode
+}
+
+// redactPII redacts PII from a string if enabled.
+func (ep *EvidencePackager) redactPII(s string) string {
+	if !ep.piiEnabled || ep.piiDetector == nil {
+		return s
+	}
+	return ep.piiDetector.Redact(s)
 }
 
 // AddCarvedFile adds a carved file to the evidence package.
@@ -481,11 +517,20 @@ func (ep *EvidencePackager) AddFlow(flow *models.Flow) string {
 }
 
 // AddCredential adds a credential to the evidence package.
+// PII redaction is applied to username and URL if enabled.
 func (ep *EvidencePackager) AddCredential(cred *models.Credential) string {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
-	c := NewCredential(cred.Username, cred.Password, cred.Protocol, cred.URL)
+	// Apply PII redaction to sensitive fields
+	username := cred.Username
+	url := cred.URL
+	if ep.piiEnabled {
+		username = ep.redactPII(username)
+		url = ep.redactPII(url)
+	}
+
+	c := NewCredential(username, cred.Password, cred.Protocol, url)
 	c.CaptureTime = time.Unix(0, cred.TimestampNano).UTC().Format(time.RFC3339Nano)
 
 	ep.bundle.AddObject(c)

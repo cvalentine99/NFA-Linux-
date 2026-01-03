@@ -30,6 +30,7 @@ import (
 	"github.com/cvalentine99/nfa-linux/internal/logging"
 	"github.com/cvalentine99/nfa-linux/internal/metrics"
 	"github.com/cvalentine99/nfa-linux/internal/models"
+	"github.com/cvalentine99/nfa-linux/internal/privacy"
 	"github.com/cvalentine99/nfa-linux/internal/parser"
 	"github.com/cvalentine99/nfa-linux/internal/reassembly"
 )
@@ -57,6 +58,9 @@ var (
 	flagExportJSON = flag.Bool("export-json", true, "Export results as JSON")
 	flagExportCASE = flag.Bool("export-case", false, "Export results in CASE/UCO format")
 	flagMetricsPort = flag.Int("metrics-port", 9090, "Port for Prometheus metrics endpoint (0 to disable)")
+	flagPIIDetect  = flag.Bool("pii-detect", false, "Enable PII detection in network traffic")
+	flagPIIRedact  = flag.Bool("pii-redact", false, "Enable PII redaction in exports (implies --pii-detect)")
+	flagPIIMode    = flag.String("pii-mode", "mask", "PII redaction mode: mask, hash, remove, label")
 )
 
 func main() {
@@ -157,6 +161,12 @@ type HeadlessAnalyzer struct {
 	dnsParser  *parser.DNSParser
 	quicParser *parser.QUICParser
 	httpParser *parser.HTTPParser
+
+	// PII detection
+	piiDetector *privacy.Detector
+	piiEnabled  bool
+	piiFindings []*PIIFindingRecord
+	piiMu       sync.RWMutex
 
 	// Results - using ring buffer to prevent unbounded memory growth
 	packets       []*models.Packet
@@ -314,6 +324,39 @@ func (a *HeadlessAnalyzer) initialize() error {
 	
 	// Initialize HTTP parser for HTTP/1.x traffic
 	a.httpParser = parser.NewHTTPParser()
+
+	// Initialize PII detection if enabled
+	if *flagPIIDetect || *flagPIIRedact {
+		a.piiEnabled = true
+		piiConfig := privacy.DefaultConfig()
+		
+		// Set redaction mode
+		switch *flagPIIMode {
+		case "hash":
+			piiConfig.Mode = privacy.RedactHash
+		case "remove":
+			piiConfig.Mode = privacy.RedactRemove
+		case "label":
+			piiConfig.Mode = privacy.RedactTypeLabel
+		default:
+			piiConfig.Mode = privacy.RedactMask
+		}
+		
+		a.piiDetector = privacy.NewDetector(piiConfig)
+		
+		// Wire PII detection to parsers
+		a.httpParser.EnablePIIDetection(a.piiDetector)
+		a.httpParser.SetPIIHandler(func(finding *parser.PIIFinding) {
+			a.recordPIIFinding("http", finding.Source, finding.Field, finding.Matches, finding.Timestamp)
+		})
+		
+		a.dnsParser.EnablePIIDetection(a.piiDetector)
+		a.dnsParser.SetPIIHandler(func(finding *parser.DNSPIIFinding) {
+			a.recordPIIFinding("dns", "query", finding.QueryName, finding.Matches, finding.Timestamp)
+		})
+		
+		logging.Info("PII detection enabled")
+	}
 
 	// Initialize evidence packager
 	packagerConfig := &evidence.EvidencePackagerConfig{
@@ -700,4 +743,49 @@ func updateSystemMetrics() {
 		metrics.MemoryUsage.Set(float64(m.Alloc))
 		metrics.GoroutineCount.Set(float64(runtime.NumGoroutine()))
 	}
+}
+
+// PIIFindingRecord stores a PII detection event.
+type PIIFindingRecord struct {
+	Protocol  string              `json:"protocol"`
+	Source    string              `json:"source"`
+	Field     string              `json:"field"`
+	Matches   []privacy.PIIMatch  `json:"matches"`
+	Timestamp int64               `json:"timestamp"`
+}
+
+// recordPIIFinding records a PII detection event.
+func (a *HeadlessAnalyzer) recordPIIFinding(protocol, source, field string, matches []privacy.PIIMatch, timestamp int64) {
+	a.piiMu.Lock()
+	defer a.piiMu.Unlock()
+	
+	// Limit stored findings to prevent memory exhaustion
+	const maxPIIFindings = 10000
+	if len(a.piiFindings) >= maxPIIFindings {
+		// Drop oldest finding
+		a.piiFindings = a.piiFindings[1:]
+	}
+	
+	a.piiFindings = append(a.piiFindings, &PIIFindingRecord{
+		Protocol:  protocol,
+		Source:    source,
+		Field:     field,
+		Matches:   matches,
+		Timestamp: timestamp,
+	})
+	
+	// Log significant findings
+	for _, m := range matches {
+		logging.Debugf("PII detected [%s/%s]: %s (confidence: %.2f)", protocol, source, m.Type, m.Confidence)
+	}
+}
+
+// GetPIIFindings returns all recorded PII findings.
+func (a *HeadlessAnalyzer) GetPIIFindings() []*PIIFindingRecord {
+	a.piiMu.RLock()
+	defer a.piiMu.RUnlock()
+	
+	result := make([]*PIIFindingRecord, len(a.piiFindings))
+	copy(result, a.piiFindings)
+	return result
 }
