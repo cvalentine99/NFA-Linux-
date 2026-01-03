@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/config"
+	"github.com/cvalentine99/nfa-linux/internal/logging"
 )
 
 // Profiler manages runtime profiling for NFA-Linux
@@ -167,7 +168,7 @@ func (p *Profiler) Start(ctx context.Context) error {
 
 		go func() {
 			if err := p.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-				fmt.Printf("pprof HTTP server error: %v\n", err)
+				logging.Debug("pprof HTTP server error", "error", err)
 			}
 		}()
 	}
@@ -209,7 +210,7 @@ func (p *Profiler) Stop() error {
 	// Write memory profile
 	if p.config.MemProfile && p.config.EnableFile {
 		if err := p.writeMemProfile(); err != nil {
-			fmt.Printf("failed to write memory profile: %v\n", err)
+			logging.Warn("failed to write memory profile", "error", err)
 		}
 	}
 
@@ -342,7 +343,7 @@ func (p *Profiler) continuousProfileLoop(ctx context.Context) {
 			snapshotNum++
 			name := fmt.Sprintf("continuous-%d", snapshotNum)
 			if err := p.TakeSnapshot(name); err != nil {
-				fmt.Printf("failed to take continuous snapshot: %v\n", err)
+				logging.Warn("failed to take continuous snapshot", "error", err)
 			}
 		}
 	}

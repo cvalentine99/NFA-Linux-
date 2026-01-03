@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +28,7 @@ import (
 	"github.com/cvalentine99/nfa-linux/internal/evidence"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 	"github.com/cvalentine99/nfa-linux/internal/parser"
+	"github.com/cvalentine99/nfa-linux/internal/logging"
 	"github.com/cvalentine99/nfa-linux/internal/reassembly"
 )
 
@@ -69,11 +69,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Set up logging
+	// Initialize structured logging
 	if *flagDebug {
-		log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
+		logging.Init(&logging.Config{
+			Level:     logging.LevelDebug,
+			Format:    "text",
+			AddSource: true,
+		})
 	} else {
-		log.SetFlags(log.LstdFlags)
+		logging.InitFromEnv()
 	}
 
 	// Create application context
@@ -85,14 +89,14 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("Shutdown signal received")
+		logging.Info("Shutdown signal received")
 		cancel()
 	}()
 
 	// Run in headless mode if requested
 	if *flagHeadless {
 		if err := runHeadless(ctx); err != nil {
-			log.Fatalf("Headless mode error: %v", err)
+			logging.Fatalf("Headless mode error: %v", err)
 		}
 		return
 	}
@@ -129,7 +133,7 @@ func main() {
 	})
 
 	if err != nil {
-		log.Fatalf("Error starting application: %v", err)
+		logging.Fatalf("Error starting application: %v", err)
 	}
 }
 
@@ -167,7 +171,7 @@ type HeadlessAnalyzer struct {
 
 // runHeadless runs the application in headless mode (CLI only).
 func runHeadless(ctx context.Context) error {
-	log.Println("Running in headless mode")
+	logging.Info("Running in headless mode")
 
 	if *flagInterface == "" && *flagPcapFile == "" {
 		return fmt.Errorf("in headless mode, you must specify either -interface or -pcap")
@@ -199,11 +203,11 @@ func runHeadless(ctx context.Context) error {
 	if *flagPcapFile != "" {
 		mode = capture.ModePCAP
 		iface = *flagPcapFile
-		log.Printf("Analyzing PCAP file: %s", *flagPcapFile)
+		logging.Infof("Analyzing PCAP file: %s", *flagPcapFile)
 	} else {
 		mode = capture.ModeAFPacket // Use AF_PACKET for headless (more compatible)
 		iface = *flagInterface
-		log.Printf("Capturing from interface: %s", *flagInterface)
+		logging.Infof("Capturing from interface: %s", *flagInterface)
 	}
 
 	analyzer.config = &capture.Config{
@@ -229,11 +233,11 @@ func runHeadless(ctx context.Context) error {
 		var captureCancel context.CancelFunc
 		captureCtx, captureCancel = context.WithTimeout(ctx, *flagDuration)
 		defer captureCancel()
-		log.Printf("Capture will run for %s", *flagDuration)
+		logging.Infof("Capture will run for %s", *flagDuration)
 	}
 
 	// Start capture
-	log.Println("Starting capture...")
+	logging.Info("Starting capture...")
 	startTime := time.Now()
 
 	if err := analyzer.run(captureCtx); err != nil {
@@ -241,7 +245,7 @@ func runHeadless(ctx context.Context) error {
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("Capture completed in %s", duration)
+	logging.Infof("Capture completed in %s", duration)
 
 	// Export results
 	if err := analyzer.exportResults(); err != nil {
@@ -462,14 +466,14 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 		if err == nil && len(carved) > 0 {
 			for _, file := range carved {
 				a.carvedFiles = append(a.carvedFiles, file)
-				log.Printf("Carved file: %s (%s, %d bytes)", file.Filename, file.MimeType, file.Size)
+				logging.Debugf("Carved file: %s (%s, %d bytes)", file.Filename, file.MimeType, file.Size)
 			}
 		}
 	}
 
 	// Progress logging every 10000 packets
 	if len(a.packets)%10000 == 0 {
-		log.Printf("Processed %d packets...", len(a.packets))
+		logging.Debugf("Processed %d packets...", len(a.packets))
 	}
 }
 
@@ -484,7 +488,7 @@ func (a *HeadlessAnalyzer) run(ctx context.Context) error {
 
 	// Stop capture
 	if err := a.engine.Stop(); err != nil {
-		log.Printf("Warning: error stopping capture: %v", err)
+		logging.Warnf("error stopping capture: %v", err)
 	}
 
 	// Get final stats
@@ -530,7 +534,7 @@ func (a *HeadlessAnalyzer) exportResults() error {
 		if err := os.WriteFile(jsonPath, jsonData, 0644); err != nil {
 			return fmt.Errorf("failed to write JSON: %w", err)
 		}
-		log.Printf("Results exported to: %s", jsonPath)
+		logging.Infof("Results exported to: %s", jsonPath)
 	}
 
 	// Export CASE/UCO format
@@ -557,7 +561,7 @@ func (a *HeadlessAnalyzer) exportResults() error {
 		if err := os.WriteFile(casePath, caseData, 0644); err != nil {
 			return fmt.Errorf("failed to write CASE/UCO: %w", err)
 		}
-		log.Printf("CASE/UCO evidence exported to: %s", casePath)
+		logging.Infof("CASE/UCO evidence exported to: %s", casePath)
 	}
 
 	return nil
@@ -619,17 +623,17 @@ func NewApp() *App {
 // startup is called when the app starts.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	log.Println("NFA-Linux starting up...")
+	logging.Info("NFA-Linux starting up...")
 }
 
 // shutdown is called when the app is closing.
 func (a *App) shutdown(ctx context.Context) {
-	log.Println("NFA-Linux shutting down...")
+	logging.Info("NFA-Linux shutting down...")
 }
 
 // domReady is called when the DOM is ready.
 func (a *App) domReady(ctx context.Context) {
-	log.Println("DOM ready, initializing UI...")
+	logging.Debug("DOM ready, initializing UI...")
 }
 
 // GetVersion returns the application version.

@@ -573,3 +573,137 @@ func (w *RotatingFileWriter) Close() error {
 	}
 	return nil
 }
+
+
+// =============================================================================
+// Printf-compatible Functions (for easy migration)
+// =============================================================================
+
+// Infof logs a formatted info message
+func Infof(format string, args ...any) {
+	Default().Info(fmt.Sprintf(format, args...))
+}
+
+// Debugf logs a formatted debug message
+func Debugf(format string, args ...any) {
+	Default().Debug(fmt.Sprintf(format, args...))
+}
+
+// Warnf logs a formatted warning message
+func Warnf(format string, args ...any) {
+	Default().Warn(fmt.Sprintf(format, args...))
+}
+
+// Errorf logs a formatted error message
+func Errorf(format string, args ...any) {
+	Default().Error(fmt.Sprintf(format, args...))
+}
+
+// Fatalf logs a formatted fatal message and exits
+func Fatalf(format string, args ...any) {
+	Default().Error(fmt.Sprintf(format, args...))
+	os.Exit(1)
+}
+
+// Printf is an alias for Infof (for easy migration from log.Printf)
+func Printf(format string, args ...any) {
+	Default().Info(fmt.Sprintf(format, args...))
+}
+
+// Println is an alias for Info (for easy migration from log.Println)
+func Println(args ...any) {
+	Default().Info(fmt.Sprint(args...))
+}
+
+// =============================================================================
+// Component-specific Loggers
+// =============================================================================
+
+var (
+	captureLogger  *Logger
+	parserLogger   *Logger
+	mlLogger       *Logger
+	carverLogger   *Logger
+	wailsLogger    *Logger
+	componentOnce  sync.Once
+)
+
+func initComponentLoggers() {
+	componentOnce.Do(func() {
+		base := Default()
+		captureLogger = base.WithComponent("capture")
+		parserLogger = base.WithComponent("parser")
+		mlLogger = base.WithComponent("ml")
+		carverLogger = base.WithComponent("carver")
+		wailsLogger = base.WithComponent("wails")
+	})
+}
+
+// Capture returns the capture component logger
+func Capture() *Logger {
+	initComponentLoggers()
+	return captureLogger
+}
+
+// Parser returns the parser component logger
+func Parser() *Logger {
+	initComponentLoggers()
+	return parserLogger
+}
+
+// ML returns the ML component logger
+func ML() *Logger {
+	initComponentLoggers()
+	return mlLogger
+}
+
+// Carver returns the carver component logger
+func Carver() *Logger {
+	initComponentLoggers()
+	return carverLogger
+}
+
+// Wails returns the wails component logger
+func Wails() *Logger {
+	initComponentLoggers()
+	return wailsLogger
+}
+
+// =============================================================================
+// Environment-based Configuration
+// =============================================================================
+
+// InitFromEnv initializes the logger from environment variables
+// NFA_LOG_LEVEL: debug, info, warn, error (default: info)
+// NFA_LOG_FORMAT: text, json (default: text)
+// NFA_LOG_FILE: path to log file (default: stderr)
+func InitFromEnv() {
+	cfg := DefaultConfig()
+
+	// Parse log level
+	switch os.Getenv("NFA_LOG_LEVEL") {
+	case "debug":
+		cfg.Level = LevelDebug
+	case "warn":
+		cfg.Level = LevelWarn
+	case "error":
+		cfg.Level = LevelError
+	default:
+		cfg.Level = LevelInfo
+	}
+
+	// Parse log format
+	if os.Getenv("NFA_LOG_FORMAT") == "json" {
+		cfg.Format = "json"
+	}
+
+	// Parse log file
+	if logFile := os.Getenv("NFA_LOG_FILE"); logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			cfg.Output = f
+		}
+	}
+
+	Init(cfg)
+}

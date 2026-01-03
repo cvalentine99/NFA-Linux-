@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"runtime"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/cvalentine99/nfa-linux/internal/logging"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
@@ -768,8 +768,12 @@ func (e *AFXDPEngine) SetEBPFFilter(srcIP, dstIP net.IP, srcPort, dstPort uint16
 		return fmt.Errorf("failed to populate filter map: %w", err)
 	}
 	
-	log.Printf("afxdp: eBPF filter configured: srcIP=%v dstIP=%v srcPort=%d dstPort=%d proto=%d",
-		srcIP, dstIP, srcPort, dstPort, protocol)
+	logging.Capture().Info("eBPF filter configured",
+		"srcIP", srcIP,
+		"dstIP", dstIP,
+		"srcPort", srcPort,
+		"dstPort", dstPort,
+		"protocol", protocol)
 	return nil
 }
 
@@ -913,7 +917,7 @@ func (e *AFXDPEngine) loadXDPProgram() error {
 	filterMap, err := ebpf.NewMap(filterMapSpec)
 	if err != nil {
 		// Non-fatal: continue without hardware filter
-		log.Printf("afxdp: warning: could not create filter map: %v", err)
+		logging.Capture().Warn("could not create filter map", "error", err)
 	} else {
 		e.filterMap = filterMap
 	}
