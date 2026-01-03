@@ -11,16 +11,16 @@ interface NavItem {
   id: ViewState['activeView']
   label: string
   icon: React.ComponentType<{ className?: string }>
-  badge?: () => number
+  badgeKey?: 'packets' | 'flows' | 'alerts'
   badgeColor?: string
 }
 
 const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'packets', label: 'Packets', icon: Package, badge: usePacketCount },
-  { id: 'flows', label: 'Flows', icon: GitBranch, badge: useFlowCount },
+  { id: 'packets', label: 'Packets', icon: Package, badgeKey: 'packets' },
+  { id: 'flows', label: 'Flows', icon: GitBranch, badgeKey: 'flows' },
   { id: 'files', label: 'Files', icon: FileText },
-  { id: 'alerts', label: 'Alerts', icon: AlertTriangle, badge: useAlertCount, badgeColor: 'bg-threat-critical' },
+  { id: 'alerts', label: 'Alerts', icon: AlertTriangle, badgeKey: 'alerts', badgeColor: 'bg-threat-critical' },
   { id: 'topology', label: 'Topology', icon: Network },
 ]
 
@@ -28,6 +28,18 @@ export function Sidebar() {
   const activeView = useActiveView()
   const setActiveView = useAppStore(state => state.setActiveView)
   const [collapsed, setCollapsed] = useState(false)
+  
+  // Call hooks at component level - NOT inside arrays or conditionals
+  const packetCount = usePacketCount()
+  const flowCount = useFlowCount()
+  const alertCount = useAlertCount()
+  
+  // Map badge keys to counts
+  const badgeCounts: Record<string, number> = {
+    packets: packetCount,
+    flows: flowCount,
+    alerts: alertCount,
+  }
   
   return (
     <aside
@@ -46,6 +58,7 @@ export function Sidebar() {
               isActive={activeView === item.id}
               collapsed={collapsed}
               onClick={() => setActiveView(item.id)}
+              badgeCount={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
             />
           ))}
         </ul>
@@ -73,11 +86,10 @@ interface NavItemComponentProps {
   isActive: boolean
   collapsed: boolean
   onClick: () => void
+  badgeCount: number
 }
 
-function NavItemComponent({ item, isActive, collapsed, onClick }: NavItemComponentProps) {
-  // Get badge count if badge function exists
-  const badgeCount = item.badge ? item.badge() : 0
+function NavItemComponent({ item, isActive, collapsed, onClick, badgeCount }: NavItemComponentProps) {
   const Icon = item.icon
   
   return (

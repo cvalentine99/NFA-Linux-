@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -124,7 +125,7 @@ func main() {
 		MinWidth:  1280,
 		MinHeight: 720,
 		AssetServer: &assetserver.Options{
-			Assets: assets,
+			Assets: mustSubFS(assets, "frontend/dist"),
 		},
 		BackgroundColour: &options.RGBA{R: 13, G: 13, B: 13, A: 1}, // Dark theme
 		OnStartup:        app.startup,
@@ -806,4 +807,13 @@ func (a *HeadlessAnalyzer) GetPIIFindings() []*PIIFindingRecord {
 	result := make([]*PIIFindingRecord, len(a.piiFindings))
 	copy(result, a.piiFindings)
 	return result
+}
+
+// mustSubFS returns a sub-filesystem or panics.
+func mustSubFS(fsys embed.FS, dir string) fs.FS {
+	sub, err := fs.Sub(fsys, dir)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create sub filesystem for %s: %v", dir, err))
+	}
+	return sub
 }
