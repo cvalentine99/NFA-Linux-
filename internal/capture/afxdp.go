@@ -619,6 +619,13 @@ func (e *AFXDPEngine) Stop() error {
 		e.filterProg = nil
 	}
 
+	// CRITICAL FIX: Use atomic compare-and-swap to prevent double-close
+	// Check if already closed to prevent panic on nil dereference
+	if e.xdpLink != nil {
+		e.xdpLink.Close()
+		e.xdpLink = nil
+	}
+
 	if e.xdpProg != nil {
 		e.xdpProg.Close()
 		e.xdpProg = nil

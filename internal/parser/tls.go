@@ -168,7 +168,8 @@ func (p *TLSParser) parseClientHello(data []byte, timestampNano int64) (*TLSClie
 		return nil, fmt.Errorf("truncated client hello")
 	}
 
-	for i := 0; i < cipherSuitesLen; i += 2 {
+	// CRITICAL FIX: Ensure we have at least 2 bytes for each cipher suite
+	for i := 0; i+1 < cipherSuitesLen && pos+i+1 < len(data); i += 2 {
 		suite := uint16(data[pos+i])<<8 | uint16(data[pos+i+1])
 		// Skip GREASE values
 		if !isGREASE(suite) {

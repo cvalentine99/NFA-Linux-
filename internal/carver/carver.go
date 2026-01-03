@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -499,12 +501,31 @@ func (fc *FileCarver) createCarvedFile(
 
 // generateFilename generates a unique filename for a carved file.
 func (fc *FileCarver) generateFilename(ext string, timestampNano int64) string {
-	// Sanitize extension to prevent path traversal
+	// CRITICAL FIX: Use strict allowlist validation for file extensions
+	// filepath.Base() can be bypassed with Windows UNC paths and Unicode sequences
+	
+	// First, strip any path components
 	ext = filepath.Base(ext)
-	if strings.Contains(ext, "..") || strings.Contains(ext, "/") || strings.Contains(ext, "\\") {
+	
+	// Strict allowlist: only allow alphanumeric extensions with leading dot
+	// This prevents UNC paths (\\server\share), Unicode exploits, and null bytes
+	validExt := regexp.MustCompile(`^\.[a-zA-Z0-9]{1,10}$`)
+	if !validExt.MatchString(ext) {
 		ext = ".bin"
 	}
-	return fmt.Sprintf("carved_%d_%d%s", timestampNano, atomic.LoadUint64(&fc.stats.FilesCarved), ext)
+	
+	// Additional safety: ensure no path separators or special chars
+	if strings.ContainsAny(ext, "/\\:\x00") {
+		ext = ".bin"
+	}
+	
+	// Use crypto/rand for unpredictable filenames to prevent collision attacks
+	randomBytes := make([]byte, 8)
+	if _, err := rand.Read(randomBytes); err != nil {
+		// Fallback to counter if crypto/rand fails
+		return fmt.Sprintf("carved_%d_%d%s", timestampNano, atomic.LoadUint64(&fc.stats.FilesCarved), ext)
+	}
+	return fmt.Sprintf("carved_%d_%x%s", timestampNano, randomBytes, ext)
 }
 
 // computeHash computes the hash of data using the configured algorithm.

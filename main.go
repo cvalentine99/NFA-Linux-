@@ -181,8 +181,9 @@ type HeadlessAnalyzer struct {
 	stats         *models.CaptureStats
 
 	// Memory management
-	memoryLimit   int64         // Maximum memory usage in bytes
-	currentMemory int64         // Current estimated memory usage
+	memoryLimit    int64         // Maximum memory usage in bytes
+	currentMemory  int64         // Current estimated memory usage
+	droppedPackets int64         // Packets dropped due to memory pressure
 
 	outputDir string
 }
@@ -403,6 +404,20 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 	// Estimate packet memory usage (rough approximation)
 	packetSize := int64(len(data) + 200) // payload + struct overhead
 	
+	// CRITICAL FIX: Enforce memory limit - drop packets if over limit
+	if a.currentMemory+packetSize > a.memoryLimit {
+		// Memory limit exceeded, must drop oldest packets first
+		for a.currentMemory+packetSize > a.memoryLimit && len(a.packets) > 0 {
+			oldIdx := a.packetHead
+			if a.packets[oldIdx] != nil {
+				a.currentMemory -= int64(len(a.packets[oldIdx].Payload) + 200)
+				a.packets[oldIdx] = nil // Release memory
+			}
+			a.packetHead = (a.packetHead + 1) % len(a.packets)
+			a.droppedPackets++
+		}
+	}
+	
 	if len(a.packets) < a.maxPackets {
 		// Still have room, append normally
 		a.packets = append(a.packets, pkt)
@@ -454,8 +469,11 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 
 	// Feed TCP packets to reassembler for stream reconstruction
 	if info.Protocol == 6 && len(data) > 0 { // TCP
-		// Create gopacket from raw data for reassembly
-		gpkt := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.DecodeOptions{Lazy: true, NoCopy: true})
+		// CRITICAL FIX: Don't use NoCopy - data buffer may be reused by capture engine
+		// Copy the data to ensure safe memory ownership
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		gpkt := gopacket.NewPacket(dataCopy, layers.LayerTypeEthernet, gopacket.DecodeOptions{Lazy: true, NoCopy: false})
 		if gpkt != nil {
 			_ = a.reassembler.ProcessPacket(gpkt)
 		}

@@ -60,6 +60,18 @@ const (
 	FrameTypeHandshakeDone    uint64 = 0x1e
 )
 
+// Safety limits to prevent integer overflow and memory exhaustion
+const (
+	// MaxQUICTokenLen is the maximum allowed token length (RFC 9000 recommends max ~8KB)
+	MaxQUICTokenLen = 8192
+	// MaxQUICPacketLen is the maximum allowed packet length (UDP max is ~65KB)
+	MaxQUICPacketLen = 65535
+	// MaxQUICCIDLen is the maximum connection ID length (RFC 9000 specifies max 20)
+	MaxQUICCIDLen = 20
+	// MaxQUICVersions is the maximum number of versions in version negotiation
+	MaxQUICVersions = 64
+)
+
 // Errors
 var (
 	ErrInvalidQUICPacket    = errors.New("invalid QUIC packet")
@@ -67,6 +79,9 @@ var (
 	ErrPacketTooShort       = errors.New("packet too short")
 	ErrDecryptionFailed     = errors.New("decryption failed")
 	ErrConnectionNotFound   = errors.New("connection not found")
+	ErrQUICTokenTooLarge    = errors.New("QUIC token exceeds maximum length")
+	ErrQUICPacketTooLarge   = errors.New("QUIC packet exceeds maximum length")
+	ErrQUICCIDTooLarge      = errors.New("QUIC connection ID exceeds maximum length")
 )
 
 // QUICHeader represents a parsed QUIC packet header.
@@ -331,6 +346,11 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 	header.DCIDLen = data[offset]
 	offset++
 	
+	// SAFETY: Validate DCID length against RFC 9000 maximum (20 bytes)
+	if header.DCIDLen > MaxQUICCIDLen {
+		return nil, 0, ErrQUICCIDTooLarge
+	}
+	
 	if len(data) < offset+int(header.DCIDLen) {
 		return nil, 0, ErrPacketTooShort
 	}
@@ -347,6 +367,11 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 	header.SCIDLen = data[offset]
 	offset++
 	
+	// SAFETY: Validate SCID length against RFC 9000 maximum (20 bytes)
+	if header.SCIDLen > MaxQUICCIDLen {
+		return nil, 0, ErrQUICCIDTooLarge
+	}
+	
 	if len(data) < offset+int(header.SCIDLen) {
 		return nil, 0, ErrPacketTooShort
 	}
@@ -362,10 +387,17 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 		if n == 0 {
 			return nil, 0, ErrPacketTooShort
 		}
+		
+		// SAFETY: Validate token length to prevent integer overflow and memory exhaustion
+		if tokenLen > MaxQUICTokenLen {
+			return nil, 0, ErrQUICTokenTooLarge
+		}
+		
 		header.TokenLen = tokenLen
 		offset += n
 		
-		if len(data) < offset+int(tokenLen) {
+		// SAFETY: Check for integer overflow before bounds check
+		if int(tokenLen) < 0 || offset > len(data)-int(tokenLen) {
 			return nil, 0, ErrPacketTooShort
 		}
 		
@@ -379,6 +411,12 @@ func (p *QUICParser) parseLongHeader(data []byte, firstByte byte) (*QUICHeader, 
 	if n == 0 {
 		return nil, 0, ErrPacketTooShort
 	}
+	
+	// SAFETY: Validate packet length to prevent integer overflow and memory exhaustion
+	if packetLen > MaxQUICPacketLen {
+		return nil, 0, ErrQUICPacketTooLarge
+	}
+	
 	header.PacketLength = packetLen
 	offset += n
 	

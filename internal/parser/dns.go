@@ -427,10 +427,11 @@ func (p *DNSParser) decodeDNSName(data []byte, offset int, depth int) (string, i
 			return "", 0, fmt.Errorf("DNS name truncated")
 		}
 		
-		// SAFETY: Detect pointer loops
+		// SAFETY: Detect pointer loops - check BEFORE any processing
 		if visited[offset] {
 			return "", 0, fmt.Errorf("DNS compression pointer loop detected at offset %d", offset)
 		}
+		// Mark as visited BEFORE processing to prevent infinite loop on first iteration
 		visited[offset] = true
 		
 		labelLen := int(data[offset])
@@ -441,13 +442,22 @@ func (p *DNSParser) decodeDNSName(data []byte, offset int, depth int) (string, i
 				return "", 0, fmt.Errorf("DNS compression pointer truncated")
 			}
 			
-			// Calculate pointer target
-			pointer := int(data[offset]&0x3F)<<8 | int(data[offset+1])
-			
-			// SAFETY: Pointer must point backwards (or at least not forward into unprocessed data)
-			if pointer >= offset {
-				return "", 0, fmt.Errorf("DNS compression pointer points forward: %d >= %d", pointer, offset)
-			}
+				// Calculate pointer target
+				pointer := int(data[offset]&0x3F)<<8 | int(data[offset+1])
+				
+				// SAFETY: Pointer must point to valid DNS name data (after 12-byte header)
+				// and must point backwards (not forward into unprocessed data)
+				const minValidPointer = 12 // DNS header is 12 bytes
+				if pointer < minValidPointer {
+					return "", 0, fmt.Errorf("DNS compression pointer targets header: %d < %d", pointer, minValidPointer)
+				}
+				if pointer >= offset {
+					return "", 0, fmt.Errorf("DNS compression pointer points forward: %d >= %d", pointer, offset)
+				}
+				// SAFETY: Pointer must not have been visited (prevents mutual pointer loops)
+				if visited[pointer] {
+					return "", 0, fmt.Errorf("DNS compression pointer creates loop to offset %d", pointer)
+				}
 			
 			if !jumped {
 				jumpOffset = offset + 2
