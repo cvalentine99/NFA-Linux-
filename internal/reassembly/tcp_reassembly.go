@@ -126,6 +126,12 @@ type TCPReassembler struct {
 	streamPool    *reassembly.StreamPool
 	assembler     *reassembly.Assembler
 	
+	// Mutex to protect gopacket assembler from concurrent access.
+	// The gopacket reassembly.Assembler is NOT thread-safe - its internal
+	// 'ret' slice is shared between AssembleWithContext() and FlushWithOptions().
+	// This mutex serializes all assembler operations to prevent data races.
+	assemblerMu sync.Mutex
+	
 	// Memory tracking
 	totalPages    int64
 	activeStreams int64
@@ -226,8 +232,11 @@ func (tr *TCPReassembler) Stop() error {
 
 	tr.wg.Wait()
 
-	// Flush all remaining streams
+	// Flush all remaining streams with mutex protection.
+	// The gopacket Assembler is not thread-safe.
+	tr.assemblerMu.Lock()
 	tr.assembler.FlushAll()
+	tr.assemblerMu.Unlock()
 
 	return nil
 }
@@ -263,7 +272,10 @@ func (tr *TCPReassembler) ProcessPacket(packet gopacket.Packet) error {
 		return nil
 	}
 
-	// Assemble the packet
+	// Assemble the packet with mutex protection.
+	// The gopacket Assembler is not thread-safe - its internal 'ret' slice
+	// is shared between AssembleWithContext() and FlushWithOptions().
+	tr.assemblerMu.Lock()
 	tr.assembler.AssembleWithContext(
 		netLayer.NetworkFlow(),
 		tcp,
@@ -272,6 +284,7 @@ func (tr *TCPReassembler) ProcessPacket(packet gopacket.Packet) error {
 			timestamp: packet.Metadata().Timestamp,
 		},
 	)
+	tr.assemblerMu.Unlock()
 
 	atomic.AddUint64(&tr.stats.PacketsProcessed, 1)
 
@@ -314,7 +327,10 @@ func (tr *TCPReassembler) ProcessTCPSegment(
 	// Create network flow
 	netFlow := gopacket.NewFlow(layers.EndpointIPv4, srcIP, dstIP)
 
-	// Assemble
+	// Assemble with mutex protection.
+	// The gopacket Assembler is not thread-safe - its internal 'ret' slice
+	// is shared between AssembleWithContext() and FlushWithOptions().
+	tr.assemblerMu.Lock()
 	tr.assembler.AssembleWithContext(
 		netFlow,
 		tcp,
@@ -327,6 +343,7 @@ func (tr *TCPReassembler) ProcessTCPSegment(
 			timestamp: time.Unix(0, timestampNano),
 		},
 	)
+	tr.assemblerMu.Unlock()
 
 	atomic.AddUint64(&tr.stats.PacketsProcessed, 1)
 
@@ -378,10 +395,16 @@ func (tr *TCPReassembler) flushLoop() {
 // flushOldConnections flushes connections older than the configured threshold.
 func (tr *TCPReassembler) flushOldConnections() {
 	cutoff := time.Now().Add(-tr.config.FlushOlderThan)
+	
+	// Protect FlushWithOptions with mutex.
+	// The gopacket Assembler is not thread-safe - its internal 'ret' slice
+	// is shared between AssembleWithContext() and FlushWithOptions().
+	tr.assemblerMu.Lock()
 	flushed, _ := tr.assembler.FlushWithOptions(reassembly.FlushOptions{
 		T:  cutoff,
 		TC: cutoff,
 	})
+	tr.assemblerMu.Unlock()
 
 	if flushed > 0 {
 		atomic.AddUint64(&tr.stats.ForcedFlushes, uint64(flushed))
