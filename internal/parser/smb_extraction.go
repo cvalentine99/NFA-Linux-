@@ -38,12 +38,31 @@ var (
 	ErrExtractionDisabled = errors.New("file extraction disabled")
 )
 
+// SEC-4 FIX: Memory limits to prevent SMB reconstruction memory bomb
+const (
+	// DefaultMaxSMBFileSize is the maximum size of a single SMB file to reconstruct (100MB)
+	DefaultMaxSMBFileSize = 100 * 1024 * 1024
+	// DefaultMaxSMBChunks is the maximum number of chunks per file
+	DefaultMaxSMBChunks = 10000
+	// DefaultMaxSMBFiles is the maximum number of concurrent file reconstructions
+	DefaultMaxSMBFiles = 1000
+	// DefaultMaxSMBTotalMemory is the total memory budget for SMB extraction (500MB)
+	DefaultMaxSMBTotalMemory = 500 * 1024 * 1024
+)
+
 // SMBFileExtractor handles file extraction from SMB traffic.
+// SEC-4 FIX: Includes hard limits to prevent memory exhaustion attacks.
 type SMBFileExtractor struct {
 	files           map[string]*extractedFile
 	outputDir       string
 	maxFileSize     int64
 	enabled         bool
+	
+	// SEC-4: Memory protection limits
+	maxChunksPerFile int
+	maxConcurrentFiles int
+	maxTotalMemory   int64
+	currentMemory    int64
 	
 	// Callbacks
 	onFileComplete  func(*ExtractedFile)
@@ -141,10 +160,15 @@ func NewSMBFileExtractor(cfg *SMBFileExtractorConfig) (*SMBFileExtractor, error)
 	}
 	
 	return &SMBFileExtractor{
-		files:       make(map[string]*extractedFile),
-		outputDir:   cfg.OutputDir,
-		maxFileSize: cfg.MaxFileSize,
-		enabled:     cfg.Enabled,
+		files:              make(map[string]*extractedFile),
+		outputDir:          cfg.OutputDir,
+		maxFileSize:        cfg.MaxFileSize,
+		enabled:            cfg.Enabled,
+		// SEC-4: Set default memory protection limits
+		maxChunksPerFile:   DefaultMaxSMBChunks,
+		maxConcurrentFiles: DefaultMaxSMBFiles,
+		maxTotalMemory:     DefaultMaxSMBTotalMemory,
+		currentMemory:      0,
 	}, nil
 }
 
@@ -199,18 +223,33 @@ func (e *SMBFileExtractor) handleCreate(op *SMBFileOperation) {
 }
 
 // handleRead handles a file read operation (download).
+// SEC-4 FIX: Enforces memory limits to prevent memory bomb attacks.
 func (e *SMBFileExtractor) handleRead(op *SMBFileOperation) {
 	if len(op.Data) == 0 {
 		return
 	}
 	
-	fileID := fmt.Sprintf("%d-%d-%s", op.SessionID, op.TreeID, op.FileName)
+	chunkSize := int64(len(op.Data))
 	
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	
+	// SEC-4: Check total memory budget
+	if e.currentMemory+chunkSize > e.maxTotalMemory {
+		// Memory budget exceeded, skip this chunk
+		return
+	}
+	
+	fileID := fmt.Sprintf("%d-%d-%s", op.SessionID, op.TreeID, op.FileName)
+	
 	file, ok := e.files[fileID]
 	if !ok {
+		// SEC-4: Check max concurrent files limit
+		if len(e.files) >= e.maxConcurrentFiles {
+			// Too many concurrent files, skip
+			return
+		}
+		
 		// Create new file entry
 		file = &extractedFile{
 			FileID:     fileID,
@@ -226,27 +265,51 @@ func (e *SMBFileExtractor) handleRead(op *SMBFileOperation) {
 		e.files[fileID] = file
 	}
 	
+	// SEC-4: Check per-file limits
+	if len(file.Chunks) >= e.maxChunksPerFile {
+		// Too many chunks for this file, skip
+		return
+	}
+	if file.ReceivedSize+chunkSize > e.maxFileSize {
+		// File too large, skip
+		return
+	}
+	
 	// Store chunk
 	chunk := make([]byte, len(op.Data))
 	copy(chunk, op.Data)
 	file.Chunks[op.Offset] = chunk
-	file.ReceivedSize += int64(len(op.Data))
+	file.ReceivedSize += chunkSize
 	file.LastWriteTime = op.TimestampNano
+	e.currentMemory += chunkSize
 }
 
 // handleWrite handles a file write operation (upload).
+// SEC-4 FIX: Enforces memory limits to prevent memory bomb attacks.
 func (e *SMBFileExtractor) handleWrite(op *SMBFileOperation) {
 	if len(op.Data) == 0 {
 		return
 	}
 	
-	fileID := fmt.Sprintf("%d-%d-%s", op.SessionID, op.TreeID, op.FileName)
+	chunkSize := int64(len(op.Data))
 	
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	
+	// SEC-4: Check total memory budget
+	if e.currentMemory+chunkSize > e.maxTotalMemory {
+		return
+	}
+	
+	fileID := fmt.Sprintf("%d-%d-%s", op.SessionID, op.TreeID, op.FileName)
+	
 	file, ok := e.files[fileID]
 	if !ok {
+		// SEC-4: Check max concurrent files limit
+		if len(e.files) >= e.maxConcurrentFiles {
+			return
+		}
+		
 		file = &extractedFile{
 			FileID:     fileID,
 			FileName:   op.FileName,
@@ -261,13 +324,22 @@ func (e *SMBFileExtractor) handleWrite(op *SMBFileOperation) {
 		e.files[fileID] = file
 	}
 	
+	// SEC-4: Check per-file limits
+	if len(file.Chunks) >= e.maxChunksPerFile {
+		return
+	}
+	if file.ReceivedSize+chunkSize > e.maxFileSize {
+		return
+	}
+	
 	// Store chunk
 	chunk := make([]byte, len(op.Data))
 	copy(chunk, op.Data)
 	file.Chunks[op.Offset] = chunk
-	file.ReceivedSize += int64(len(op.Data))
+	file.ReceivedSize += chunkSize
 	file.LastWriteTime = op.TimestampNano
 	file.IsWriteOp = true
+	e.currentMemory += chunkSize
 }
 
 // handleClose handles a file close operation.

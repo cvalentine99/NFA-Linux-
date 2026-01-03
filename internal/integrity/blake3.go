@@ -15,14 +15,83 @@ import (
 	"github.com/zeebo/blake3"
 )
 
-// validatePath checks for path traversal attempts.
-func validatePath(path string) error {
-	// Clean the path to resolve any .. or . components
-	cleanPath := filepath.Clean(path)
-	// Check for path traversal attempts
-	if strings.Contains(cleanPath, "..") {
-		return errors.New("path traversal detected")
+// AllowedBasePaths defines the directories that are allowed for file operations.
+// This should be configured at startup based on the application's needs.
+var AllowedBasePaths = []string{
+	"/tmp/nfa-linux",
+	"/var/lib/nfa-linux",
+}
+
+// SetAllowedBasePaths configures the allowed base paths for file operations.
+func SetAllowedBasePaths(paths []string) {
+	AllowedBasePaths = paths
+}
+
+// AddAllowedBasePath adds a path to the allowed base paths.
+func AddAllowedBasePath(path string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve absolute path: %w", err)
 	}
+	AllowedBasePaths = append(AllowedBasePaths, absPath)
+	return nil
+}
+
+// validatePath checks for path traversal attempts using proper absolute path resolution.
+// This is the SECURE implementation that prevents path traversal attacks.
+func validatePath(path string) error {
+	// First, clean the path
+	cleanPath := filepath.Clean(path)
+	
+	// Convert to absolute path - this resolves all .. and . components
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+	
+	// Check if the absolute path is within any of the allowed base paths
+	allowed := false
+	for _, basePath := range AllowedBasePaths {
+		// Ensure basePath is also absolute
+		absBasePath, err := filepath.Abs(basePath)
+		if err != nil {
+			continue
+		}
+		// Use HasPrefix to check if path is within allowed directory
+		// Add trailing separator to prevent prefix attacks (e.g., /tmp/nfa-linux-evil)
+		if strings.HasPrefix(absPath, absBasePath+string(filepath.Separator)) || absPath == absBasePath {
+			allowed = true
+			break
+		}
+	}
+	
+	if !allowed {
+		return fmt.Errorf("path traversal detected: %s is not within allowed directories", absPath)
+	}
+	
+	return nil
+}
+
+// validatePathWithBase checks if a path is within a specific base directory.
+// This is useful when you need to validate against a specific directory.
+func validatePathWithBase(path, basePath string) error {
+	// Clean and resolve both paths
+	cleanPath := filepath.Clean(path)
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve absolute path: %w", err)
+	}
+	
+	absBasePath, err := filepath.Abs(basePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve base path: %w", err)
+	}
+	
+	// Check if the path is within the base directory
+	if !strings.HasPrefix(absPath, absBasePath+string(filepath.Separator)) && absPath != absBasePath {
+		return fmt.Errorf("path traversal detected: %s is not within %s", absPath, absBasePath)
+	}
+	
 	return nil
 }
 

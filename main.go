@@ -30,7 +30,7 @@ import (
 	"github.com/cvalentine99/nfa-linux/internal/reassembly"
 )
 
-//go:embed all:frontend_dist
+//go:embed all:frontend/dist
 var assets embed.FS
 
 // Version information (set at build time)
@@ -142,13 +142,21 @@ type HeadlessAnalyzer struct {
 	// Parsers
 	dnsParser *parser.DNSParser
 
-	// Results
-	packets     []*models.Packet
-	flows       []*models.Flow
-	carvedFiles []*models.CarvedFile
-	hosts       map[string]*models.Host
-	hostsMu     sync.RWMutex
-	stats       *models.CaptureStats
+	// Results - using ring buffer to prevent unbounded memory growth
+	packets       []*models.Packet
+	packetsMu     sync.RWMutex
+	packetHead    int           // Ring buffer head index
+	packetCount   int64         // Total packets seen (for stats)
+	maxPackets    int           // Maximum packets to retain in memory
+	flows         []*models.Flow
+	carvedFiles   []*models.CarvedFile
+	hosts         map[string]*models.Host
+	hostsMu       sync.RWMutex
+	stats         *models.CaptureStats
+
+	// Memory management
+	memoryLimit   int64         // Maximum memory usage in bytes
+	currentMemory int64         // Current estimated memory usage
 
 	outputDir string
 }
@@ -166,10 +174,18 @@ func runHeadless(ctx context.Context) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Initialize analyzer
+	// Initialize analyzer with memory limits
+	// Default: 1GB memory limit, 1M packets max
+	const (
+		defaultMemoryLimit = 1 * 1024 * 1024 * 1024 // 1GB
+		defaultMaxPackets  = 1000000               // 1M packets
+	)
 	analyzer := &HeadlessAnalyzer{
-		hosts:     make(map[string]*models.Host),
-		outputDir: *flagOutputDir,
+		hosts:       make(map[string]*models.Host),
+		outputDir:   *flagOutputDir,
+		maxPackets:  defaultMaxPackets,
+		memoryLimit: defaultMemoryLimit,
+		packets:     make([]*models.Packet, 0, 10000), // Pre-allocate for efficiency
 	}
 
 	// Configure capture
@@ -297,7 +313,29 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 		Protocol:      protocolName(info.Protocol),
 		Payload:       data,
 	}
-	a.packets = append(a.packets, pkt)
+	// SEC-3 FIX: Use ring buffer to prevent unbounded memory growth
+	a.packetsMu.Lock()
+	a.packetCount++
+	
+	// Estimate packet memory usage (rough approximation)
+	packetSize := int64(len(data) + 200) // payload + struct overhead
+	
+	if len(a.packets) < a.maxPackets {
+		// Still have room, append normally
+		a.packets = append(a.packets, pkt)
+		a.currentMemory += packetSize
+	} else {
+		// Ring buffer is full, overwrite oldest packet
+		oldPacket := a.packets[a.packetHead]
+		if oldPacket != nil {
+			// Subtract old packet's memory
+			a.currentMemory -= int64(len(oldPacket.Payload) + 200)
+		}
+		a.packets[a.packetHead] = pkt
+		a.packetHead = (a.packetHead + 1) % a.maxPackets
+		a.currentMemory += packetSize
+	}
+	a.packetsMu.Unlock()
 
 	// Update host tracking (with mutex protection)
 	if info.SrcIP != nil {

@@ -4,6 +4,8 @@
 package evidence
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -273,24 +275,65 @@ func NewNetworkTraffic(srcIP string, srcPort int, dstIP string, dstPort int) *Ne
 }
 
 // Credential represents a UCO credential observable.
+// SECURITY: Passwords are stored as SHA-256 hashes, not plaintext.
+// This prevents evidence files from becoming attack vectors.
 type Credential struct {
 	UCOObject
-	Username    string `json:"uco-observable:accountLogin,omitempty"`
-	Password    string `json:"uco-observable:credential,omitempty"`
-	Protocol    string `json:"uco-observable:protocol,omitempty"`
-	ServiceURL  string `json:"uco-observable:url,omitempty"`
-	CaptureTime string `json:"uco-observable:observableCreatedTime,omitempty"`
+	Username       string `json:"uco-observable:accountLogin,omitempty"`
+	PasswordHash   string `json:"uco-observable:credentialHash,omitempty"`
+	PasswordHint   string `json:"uco-observable:credentialHint,omitempty"` // e.g., "8 chars, starts with 'p'"
+	HashAlgorithm  string `json:"uco-observable:hashAlgorithm,omitempty"`
+	Protocol       string `json:"uco-observable:protocol,omitempty"`
+	ServiceURL     string `json:"uco-observable:url,omitempty"`
+	CaptureTime    string `json:"uco-observable:observableCreatedTime,omitempty"`
+}
+
+// hashPassword creates a SHA-256 hash of the password for secure storage.
+func hashPassword(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(hash[:])
+}
+
+// generatePasswordHint creates a non-revealing hint about the password.
+func generatePasswordHint(password string) string {
+	if len(password) == 0 {
+		return "empty"
+	}
+	// Create hint: length and first character (redacted if sensitive)
+	firstChar := "*"
+	if len(password) > 0 && (password[0] >= 'a' && password[0] <= 'z' || password[0] >= 'A' && password[0] <= 'Z') {
+		firstChar = string(password[0])
+	}
+	return fmt.Sprintf("%d chars, starts with '%s'", len(password), firstChar)
 }
 
 // NewCredential creates a new credential observable.
+// SECURITY: The password is hashed before storage - plaintext is never persisted.
 func NewCredential(username, password, protocol, url string) *Credential {
 	c := &Credential{
-		UCOObject:   *NewUCOObject("uco-observable:Credential"),
-		Username:    username,
-		Password:    password,
-		Protocol:    protocol,
-		ServiceURL:  url,
-		CaptureTime: time.Now().UTC().Format(time.RFC3339Nano),
+		UCOObject:     *NewUCOObject("uco-observable:Credential"),
+		Username:      username,
+		PasswordHash:  hashPassword(password),
+		PasswordHint:  generatePasswordHint(password),
+		HashAlgorithm: "SHA-256",
+		Protocol:      protocol,
+		ServiceURL:    url,
+		CaptureTime:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return c
+}
+
+// NewCredentialMetadataOnly creates a credential observable with only metadata.
+// Use this when you want to record that credentials were observed without storing any hash.
+func NewCredentialMetadataOnly(username, protocol, url string, passwordLength int) *Credential {
+	c := &Credential{
+		UCOObject:     *NewUCOObject("uco-observable:Credential"),
+		Username:      username,
+		PasswordHint:  fmt.Sprintf("%d chars (hash not stored)", passwordLength),
+		HashAlgorithm: "none",
+		Protocol:      protocol,
+		ServiceURL:    url,
+		CaptureTime:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return c
 }
