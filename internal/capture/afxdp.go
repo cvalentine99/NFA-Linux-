@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"runtime"
 	"strconv"
@@ -107,6 +108,7 @@ type AFXDPEngine struct {
 	xdpProg     *ebpf.Program
 	xdpLink     link.Link
 	xdpMap      *ebpf.Map
+	filterMap   *ebpf.Map  // eBPF filter configuration map
 	filterProg  *ebpf.Program
 
 	// Worker management
@@ -626,6 +628,11 @@ func (e *AFXDPEngine) Stop() error {
 		e.xdpMap.Close()
 		e.xdpMap = nil
 	}
+	
+	if e.filterMap != nil {
+		e.filterMap.Close()
+		e.filterMap = nil
+	}
 
 	return nil
 }
@@ -710,6 +717,71 @@ func (e *AFXDPEngine) SetBPFFilter(filter string) error {
 	e.mu.Unlock()
 
 	return nil
+}
+
+// SetEBPFFilter populates the eBPF filter map with filter configuration.
+// This enables hardware-accelerated filtering in the XDP program.
+func (e *AFXDPEngine) SetEBPFFilter(srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol uint8) error {
+	if e.filterMap == nil {
+		return fmt.Errorf("eBPF filter map not available")
+	}
+	
+	// FilterConfig struct layout (must match eBPF program expectations):
+	// - enabled:  uint32 (4 bytes)
+	// - srcIP:    uint32 (4 bytes, big-endian IPv4)
+	// - dstIP:    uint32 (4 bytes, big-endian IPv4)
+	// - srcPort:  uint16 (2 bytes, big-endian)
+	// - dstPort:  uint16 (2 bytes, big-endian)
+	// - protocol: uint8  (1 byte)
+	// - padding:  [7]uint8 (7 bytes to align to 24)
+	var filterData [24]byte
+	
+	// Set enabled flag
+	binary.LittleEndian.PutUint32(filterData[0:4], 1)
+	
+	// Set source IP (convert to uint32)
+	if srcIP != nil {
+		ip4 := srcIP.To4()
+		if ip4 != nil {
+			binary.BigEndian.PutUint32(filterData[4:8], binary.BigEndian.Uint32(ip4))
+		}
+	}
+	
+	// Set destination IP
+	if dstIP != nil {
+		ip4 := dstIP.To4()
+		if ip4 != nil {
+			binary.BigEndian.PutUint32(filterData[8:12], binary.BigEndian.Uint32(ip4))
+		}
+	}
+	
+	// Set ports (big-endian for network byte order)
+	binary.BigEndian.PutUint16(filterData[12:14], srcPort)
+	binary.BigEndian.PutUint16(filterData[14:16], dstPort)
+	
+	// Set protocol
+	filterData[16] = protocol
+	
+	// Write to eBPF map
+	key := uint32(0)
+	if err := e.filterMap.Put(key, filterData); err != nil {
+		return fmt.Errorf("failed to populate filter map: %w", err)
+	}
+	
+	log.Printf("afxdp: eBPF filter configured: srcIP=%v dstIP=%v srcPort=%d dstPort=%d proto=%d",
+		srcIP, dstIP, srcPort, dstPort, protocol)
+	return nil
+}
+
+// ClearEBPFFilter disables the eBPF filter.
+func (e *AFXDPEngine) ClearEBPFFilter() error {
+	if e.filterMap == nil {
+		return nil
+	}
+	
+	var filterData [24]byte // All zeros = disabled
+	key := uint32(0)
+	return e.filterMap.Put(key, filterData)
 }
 
 // compileBPFFilter compiles a BPF filter expression into a filter function
@@ -828,6 +900,23 @@ func (e *AFXDPEngine) loadXDPProgram() error {
 		return e.loadFallbackProgram()
 	}
 	e.xdpMap = xskMap
+	
+	// Create eBPF filter configuration map
+	// This map stores filter rules that the XDP program can check
+	filterMapSpec := &ebpf.MapSpec{
+		Name:       "filter_config",
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  24, // FilterConfig struct: enabled(4) + srcIP(4) + dstIP(4) + srcPort(2) + dstPort(2) + proto(1) + pad(7)
+		MaxEntries: 1,
+	}
+	filterMap, err := ebpf.NewMap(filterMapSpec)
+	if err != nil {
+		// Non-fatal: continue without hardware filter
+		log.Printf("afxdp: warning: could not create filter map: %v", err)
+	} else {
+		e.filterMap = filterMap
+	}
 
 	// Create XDP program with redirect to XSKMAP
 	redirectSpec := &ebpf.ProgramSpec{

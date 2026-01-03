@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -140,7 +142,9 @@ type HeadlessAnalyzer struct {
 	packager     *evidence.EvidencePackager
 
 	// Parsers
-	dnsParser *parser.DNSParser
+	dnsParser  *parser.DNSParser
+	quicParser *parser.QUICParser
+	httpParser *parser.HTTPParser
 
 	// Results - using ring buffer to prevent unbounded memory growth
 	packets       []*models.Packet
@@ -260,6 +264,24 @@ func (a *HeadlessAnalyzer) initialize() error {
 	if err != nil {
 		return fmt.Errorf("failed to create TCP reassembler: %w", err)
 	}
+	
+	// Set up stream handler to parse reassembled TCP data
+	a.reassembler.SetStreamHandler(func(stream *reassembly.Stream, data []byte, isClient bool) {
+		// Detect HTTP traffic on port 80
+		if stream.ServerPort == 80 || stream.ClientPort == 80 {
+			if isClient {
+				// Parse HTTP request
+				if a.httpParser != nil {
+					_, _ = a.httpParser.ParseRequest(data, stream.LastSeenNano)
+				}
+			} else {
+				// Parse HTTP response
+				if a.httpParser != nil {
+					_, _ = a.httpParser.ParseResponse(data, stream.LastSeenNano)
+				}
+			}
+		}
+	})
 
 	// Initialize file carver
 	carverConfig := carver.DefaultCarverConfig()
@@ -274,6 +296,12 @@ func (a *HeadlessAnalyzer) initialize() error {
 
 	// Initialize DNS parser
 	a.dnsParser = parser.NewDNSParser()
+	
+	// Initialize QUIC parser for UDP/443 traffic
+	a.quicParser = parser.NewQUICParser(nil)
+	
+	// Initialize HTTP parser for HTTP/1.x traffic
+	a.httpParser = parser.NewHTTPParser()
 
 	// Initialize evidence packager
 	packagerConfig := &evidence.EvidencePackagerConfig{
@@ -369,6 +397,15 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 	}
 	a.hostsMu.Unlock()
 
+	// Feed TCP packets to reassembler for stream reconstruction
+	if info.Protocol == 6 && len(data) > 0 { // TCP
+		// Create gopacket from raw data for reassembly
+		gpkt := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.DecodeOptions{Lazy: true, NoCopy: true})
+		if gpkt != nil {
+			_ = a.reassembler.ProcessPacket(gpkt)
+		}
+	}
+
 	// Parse DNS
 	if info.DstPort == 53 || info.SrcPort == 53 {
 		pkt.AppProtocol = "DNS"
@@ -379,9 +416,36 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 		pkt.AppProtocol = "HTTP"
 	}
 
-	// Parse TLS
+	// Parse TLS/QUIC on port 443
 	if info.DstPort == 443 || info.SrcPort == 443 {
-		pkt.AppProtocol = "TLS"
+		// Check if UDP - likely QUIC
+		if info.Protocol == 17 { // UDP
+			pkt.AppProtocol = "QUIC"
+			// Parse QUIC packet
+			if len(data) > 0 && a.quicParser != nil {
+				srcIP := ""
+				dstIP := ""
+				if info.SrcIP != nil {
+					srcIP = info.SrcIP.String()
+				}
+				if info.DstIP != nil {
+					dstIP = info.DstIP.String()
+				}
+				quicPkt, err := a.quicParser.ParsePacket(data, srcIP, dstIP, info.SrcPort, info.DstPort, info.TimestampNano)
+				if err == nil && quicPkt != nil {
+					// Extract QUIC connection info for packet summary
+					if quicPkt.Header != nil {
+						if quicPkt.Header.IsLongHeader {
+							pkt.Info = fmt.Sprintf("QUIC %s v%d", quicPkt.Header.PacketType, quicPkt.Header.Version)
+						} else {
+							pkt.Info = "QUIC 1-RTT"
+						}
+					}
+				}
+			}
+		} else {
+			pkt.AppProtocol = "TLS"
+		}
 	}
 
 	// Try to carve files from payload

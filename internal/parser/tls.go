@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -504,43 +505,82 @@ func (p *TLSParser) computeJA3S(sh *TLSServerHello) (string, string) {
 
 // computeJA4 computes the JA4 fingerprint for a Client Hello.
 // JA4 format: t13d1516h2_8daaf6152771_e5627efa2ab1
+// FIXED: Corrected SNI logic, use SHA256 (not MD5), filter GREASE values
 func (p *TLSParser) computeJA4(ch *TLSClientHello) string {
 	// Part 1: Protocol info
 	// t = TLS, q = QUIC, d = DTLS
 	proto := "t"
 
-	// TLS version (2 chars)
+	// TLS version (2 chars) - check supported_versions extension first for TLS 1.3
 	version := "00"
-	switch ch.Version {
-	case 0x0301:
-		version = "10"
-	case 0x0302:
-		version = "11"
-	case 0x0303:
-		version = "12"
-	case 0x0304:
-		version = "13"
+	if len(ch.SupportedVersions) > 0 {
+		// Use highest non-GREASE supported version
+		for _, v := range ch.SupportedVersions {
+			if !isGREASE(v) {
+				switch v {
+				case 0x0304:
+					version = "13"
+				case 0x0303:
+					if version != "13" {
+						version = "12"
+					}
+				case 0x0302:
+					if version != "13" && version != "12" {
+						version = "11"
+					}
+				case 0x0301:
+					if version == "00" {
+						version = "10"
+					}
+				}
+			}
+		}
+	} else {
+		// Fall back to record version
+		switch ch.Version {
+		case 0x0301:
+			version = "10"
+		case 0x0302:
+			version = "11"
+		case 0x0303:
+			version = "12"
+		case 0x0304:
+			version = "13"
+		}
 	}
 
-	// SNI present
-	sni := "d"
+	// SNI present - FIX: "d" means domain present, "i" means IP or no SNI
+	sni := "i" // default: no SNI or IP literal
 	if ch.SNI != "" {
-		sni = "i"
+		// Check if it looks like an IP address
+		if net.ParseIP(ch.SNI) == nil {
+			sni = "d" // domain name present
+		}
 	}
 
-	// Number of cipher suites (2 digits, capped at 99)
-	numCiphers := len(ch.CipherSuites)
-	if numCiphers > 99 {
-		numCiphers = 99
+	// Count non-GREASE cipher suites
+	nonGreaseCiphers := 0
+	for _, c := range ch.CipherSuites {
+		if !isGREASE(c) {
+			nonGreaseCiphers++
+		}
+	}
+	if nonGreaseCiphers > 99 {
+		nonGreaseCiphers = 99
 	}
 
-	// Number of extensions (2 digits, capped at 99)
-	numExts := len(ch.Extensions)
-	if numExts > 99 {
-		numExts = 99
+	// Count non-GREASE extensions
+	nonGreaseExts := 0
+	for _, e := range ch.Extensions {
+		if !isGREASE(e) {
+			nonGreaseExts++
+		}
+	}
+	if nonGreaseExts > 99 {
+		nonGreaseExts = 99
 	}
 
-	// ALPN first value
+	// ALPN first value (first 2 chars)
 	alpn := "00"
 	if len(ch.ALPNProtocols) > 0 {
 		first := ch.ALPNProtocols[0]
@@ -551,41 +591,52 @@ func (p *TLSParser) computeJA4(ch *TLSClientHello) string {
 		}
 	}
 
-	part1 := fmt.Sprintf("%s%s%s%02d%02d%s", proto, version, sni, numCiphers, numExts, alpn)
+	part1 := fmt.Sprintf("%s%s%s%02d%02d%s", proto, version, sni, nonGreaseCiphers, nonGreaseExts, alpn)
 
 	// Part 2: Sorted cipher suites hash (first 12 chars of SHA256)
-	sortedCiphers := make([]uint16, len(ch.CipherSuites))
-	copy(sortedCiphers, ch.CipherSuites)
-	sort.Slice(sortedCiphers, func(i, j int) bool {
-		return sortedCiphers[i] < sortedCiphers[j]
+	// FIX: Filter out GREASE values before hashing
+	var filteredCiphers []uint16
+	for _, c := range ch.CipherSuites {
+		if !isGREASE(c) {
+			filteredCiphers = append(filteredCiphers, c)
+		}
+	}
+	sort.Slice(filteredCiphers, func(i, j int) bool {
+		return filteredCiphers[i] < filteredCiphers[j]
 	})
 
 	var cipherBuilder strings.Builder
-	cipherBuilder.Grow(len(sortedCiphers) * 5) // 4 hex chars + comma
-	for i, c := range sortedCiphers {
+	cipherBuilder.Grow(len(filteredCiphers) * 5)
+	for i, c := range filteredCiphers {
 		if i > 0 {
 			cipherBuilder.WriteByte(',')
 		}
 		fmt.Fprintf(&cipherBuilder, "%04x", c)
 	}
-	part2 := truncateHash(cipherBuilder.String(), 12)
+	part2 := truncateSHA256(cipherBuilder.String(), 12)
 
 	// Part 3: Sorted extensions hash (first 12 chars of SHA256)
-	sortedExts := make([]uint16, len(ch.Extensions))
-	copy(sortedExts, ch.Extensions)
-	sort.Slice(sortedExts, func(i, j int) bool {
-		return sortedExts[i] < sortedExts[j]
+	// FIX: Filter out GREASE values and SNI/ALPN extensions before hashing
+	var filteredExts []uint16
+	for _, e := range ch.Extensions {
+		// Skip GREASE, SNI (0x0000), and ALPN (0x0010) as per JA4 spec
+		if !isGREASE(e) && e != 0x0000 && e != 0x0010 {
+			filteredExts = append(filteredExts, e)
+		}
+	}
+	sort.Slice(filteredExts, func(i, j int) bool {
+		return filteredExts[i] < filteredExts[j]
 	})
 
 	var extBuilder strings.Builder
-	extBuilder.Grow(len(sortedExts) * 5) // 4 hex chars + comma
-	for i, e := range sortedExts {
+	extBuilder.Grow(len(filteredExts) * 5)
+	for i, e := range filteredExts {
 		if i > 0 {
 			extBuilder.WriteByte(',')
 		}
 		fmt.Fprintf(&extBuilder, "%04x", e)
 	}
-	part3 := truncateHash(extBuilder.String(), 12)
+	part3 := truncateSHA256(extBuilder.String(), 12)
 
 	return fmt.Sprintf("%s_%s_%s", part1, part2, part3)
 }
@@ -596,9 +647,19 @@ func isGREASE(val uint16) bool {
 	return (val & 0x0f0f) == 0x0a0a
 }
 
-// truncateHash computes a hash and returns the first n characters.
+// truncateHash computes MD5 hash and returns the first n characters (for JA3 compatibility).
 func truncateHash(s string, n int) string {
 	hash := md5.Sum([]byte(s))
+	hexStr := hex.EncodeToString(hash[:])
+	if len(hexStr) > n {
+		return hexStr[:n]
+	}
+	return hexStr
+}
+
+// truncateSHA256 computes SHA256 hash and returns the first n characters (for JA4).
+func truncateSHA256(s string, n int) string {
+	hash := sha256.Sum256([]byte(s))
 	hexStr := hex.EncodeToString(hash[:])
 	if len(hexStr) > n {
 		return hexStr[:n]

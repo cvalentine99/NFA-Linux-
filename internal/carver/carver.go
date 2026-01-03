@@ -41,6 +41,18 @@ type FileSignature struct {
 	Dangerous  bool     // Whether this file type is potentially dangerous
 }
 
+// Safety bounds constants to prevent resource exhaustion
+const (
+	// MaxFilesPerStream limits files carved from a single stream to prevent DoS
+	MaxFilesPerStream = 100
+	
+	// MaxTotalCarvedFiles limits total files to prevent disk exhaustion
+	MaxTotalCarvedFiles = 10000
+	
+	// MaxCarvedBytesTotal limits total bytes carved (default 10GB)
+	MaxCarvedBytesTotal = 10 * 1024 * 1024 * 1024
+)
+
 // CarverConfig holds configuration for the file carver.
 type CarverConfig struct {
 	// OutputDir is the directory where carved files are saved.
@@ -78,23 +90,41 @@ type CarverConfig struct {
 
 	// ExtractMedia enables extraction of audio/video files.
 	ExtractMedia bool
+	
+	// MetadataOnly disables writing files to disk, only records metadata.
+	// This is safer for forensic analysis as it doesn't create artifacts.
+	MetadataOnly bool
+	
+	// QuarantineExecutables moves executables to a quarantine directory.
+	QuarantineExecutables bool
+	
+	// MaxFilesPerStream limits files carved from a single stream.
+	MaxFilesPerStream int
+	
+	// MaxTotalFiles limits total files carved across all streams.
+	MaxTotalFiles int
 }
 
 // DefaultCarverConfig returns a sensible default configuration.
+// SAFETY: MetadataOnly is true by default to prevent creating artifacts on analyst machines.
 func DefaultCarverConfig() *CarverConfig {
 	return &CarverConfig{
-		OutputDir:          config.Paths.CarvedFilesDir,
-		MaxFileSize:        100 * 1024 * 1024, // 100MB
-		MinFileSize:        100,               // 100 bytes
-		EnableHashing:      true,
-		HashAlgorithm:      "blake3",
-		BufferSize:         64 * 1024, // 64KB
-		MaxConcurrent:      8,
-		ExtractExecutables: true,
-		ExtractArchives:    true,
-		ExtractDocuments:   true,
-		ExtractImages:      true,
-		ExtractMedia:       true,
+		OutputDir:             config.Paths.CarvedFilesDir,
+		MaxFileSize:           100 * 1024 * 1024, // 100MB
+		MinFileSize:           100,               // 100 bytes
+		EnableHashing:         true,
+		HashAlgorithm:         "blake3",
+		BufferSize:            64 * 1024, // 64KB
+		MaxConcurrent:         8,
+		ExtractExecutables:    false, // SAFETY: Disabled by default
+		ExtractArchives:       true,
+		ExtractDocuments:      true,
+		ExtractImages:         true,
+		ExtractMedia:          true,
+		MetadataOnly:          true,  // SAFETY: Don't write files by default
+		QuarantineExecutables: true,  // SAFETY: Quarantine if extraction enabled
+		MaxFilesPerStream:     MaxFilesPerStream,
+		MaxTotalFiles:         MaxTotalCarvedFiles,
 	}
 }
 
@@ -180,6 +210,7 @@ func (fc *FileCarver) SetThreatHandler(handler func(*models.CarvedFile, string))
 }
 
 // CarveFromStream attempts to carve files from a data stream.
+// SAFETY: Enforces per-stream and total file limits to prevent resource exhaustion.
 func (fc *FileCarver) CarveFromStream(
 	data []byte,
 	srcIP, dstIP string,
@@ -189,8 +220,24 @@ func (fc *FileCarver) CarveFromStream(
 	if len(data) < int(fc.config.MinFileSize) {
 		return nil, nil
 	}
+	
+	// SAFETY: Check if we've hit the total file limit
+	totalCarved := atomic.LoadUint64(&fc.stats.FilesCarved)
+	if totalCarved >= uint64(fc.config.MaxTotalFiles) {
+		return nil, errors.New("carver: total file limit reached")
+	}
+	
+	// SAFETY: Check if we've hit the total bytes limit
+	totalBytes := atomic.LoadUint64(&fc.stats.BytesCarved)
+	if totalBytes >= MaxCarvedBytesTotal {
+		return nil, errors.New("carver: total bytes limit reached")
+	}
 
 	var carvedFiles []*models.CarvedFile
+	maxPerStream := fc.config.MaxFilesPerStream
+	if maxPerStream <= 0 {
+		maxPerStream = MaxFilesPerStream
+	}
 
 	// First, try MIME type detection on the entire stream
 	mtype := mimetype.Detect(data)
@@ -201,9 +248,20 @@ func (fc *FileCarver) CarveFromStream(
 			carvedFiles = append(carvedFiles, file)
 		}
 	}
+	
+	// SAFETY: Check per-stream limit before scanning for embedded files
+	if len(carvedFiles) >= maxPerStream {
+		return carvedFiles, nil
+	}
 
 	// Then, scan for embedded files using magic byte signatures
 	embedded := fc.scanForEmbeddedFiles(data, srcIP, dstIP, srcPort, dstPort, timestampNano)
+	
+	// SAFETY: Enforce per-stream limit
+	remaining := maxPerStream - len(carvedFiles)
+	if len(embedded) > remaining {
+		embedded = embedded[:remaining]
+	}
 	carvedFiles = append(carvedFiles, embedded...)
 
 	return carvedFiles, nil
@@ -234,18 +292,33 @@ func (fc *FileCarver) extractFile(
 
 	// Generate filename
 	filename := fc.generateFilename(mtype.Extension(), timestampNano)
+	outPath := filepath.Join(fc.config.OutputDir, filename)
+	
+	// SAFETY: Check if this is an executable and handle accordingly
+	isExecutable := category == "executable"
+	if isExecutable && fc.config.QuarantineExecutables {
+		// Use quarantine subdirectory for executables
+		quarantineDir := filepath.Join(fc.config.OutputDir, "quarantine")
+		if err := os.MkdirAll(quarantineDir, 0700); err == nil {
+			outPath = filepath.Join(quarantineDir, filename)
+		}
+	}
 
-	// Save file
-	filepath := filepath.Join(fc.config.OutputDir, filename)
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
-		atomic.AddUint64(&fc.stats.Errors, 1)
-		return nil, fmt.Errorf("failed to write file: %w", err)
+	// Save file (unless MetadataOnly mode)
+	if !fc.config.MetadataOnly {
+		if err := os.WriteFile(outPath, data, 0644); err != nil {
+			atomic.AddUint64(&fc.stats.Errors, 1)
+			return nil, fmt.Errorf("failed to write file: %w", err)
+		}
+	} else {
+		// In MetadataOnly mode, don't write the file but record the path it would have
+		outPath = "[metadata-only]" + outPath
 	}
 
 	// Create carved file record
 	carvedFile := &models.CarvedFile{
 		Filename:      filename,
-		FilePath:      filepath,
+		FilePath:      outPath,
 		Size:          int64(len(data)),
 		MimeType:      mtype.String(),
 		MIMEType:      mtype.String(),
@@ -362,16 +435,29 @@ func (fc *FileCarver) createCarvedFile(
 	timestampNano int64,
 ) *models.CarvedFile {
 	filename := fc.generateFilename(sig.Extension, timestampNano)
-	filepath := filepath.Join(fc.config.OutputDir, filename)
+	outPath := filepath.Join(fc.config.OutputDir, filename)
+	
+	// SAFETY: Quarantine dangerous files
+	if sig.Dangerous && fc.config.QuarantineExecutables {
+		quarantineDir := filepath.Join(fc.config.OutputDir, "quarantine")
+		if err := os.MkdirAll(quarantineDir, 0700); err == nil {
+			outPath = filepath.Join(quarantineDir, filename)
+		}
+	}
 
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
-		atomic.AddUint64(&fc.stats.Errors, 1)
-		return nil
+	// Save file (unless MetadataOnly mode)
+	if !fc.config.MetadataOnly {
+		if err := os.WriteFile(outPath, data, 0644); err != nil {
+			atomic.AddUint64(&fc.stats.Errors, 1)
+			return nil
+		}
+	} else {
+		outPath = "[metadata-only]" + outPath
 	}
 
 	carvedFile := &models.CarvedFile{
 		Filename:      filename,
-		FilePath:      filepath,
+		FilePath:      outPath,
 		Size:          int64(len(data)),
 		MimeType:      sig.MIMEType,
 		MIMEType:      sig.MIMEType,
