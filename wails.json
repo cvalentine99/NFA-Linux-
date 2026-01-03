@@ -27,7 +27,7 @@
       "suffix": ""
     }
   },
-  "wailsjsdir": "./frontend/src/wailsjs",
+  "wailsjsdir": "./frontend/wailsjs",
   "assetdir": "./frontend/dist",
   "reloaddirs": "./frontend/src",
   "debounceMS": 100
