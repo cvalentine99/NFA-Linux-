@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
+import { shallow } from 'zustand/shallow'
+import { useMemo, useRef } from 'react'
 import type {
   Packet, Flow, ExtractedFile, Alert, Statistics,
   CaptureState, ViewState, FilterState, TimeRange,
@@ -28,6 +30,12 @@ interface AppState {
   
   // UI state
   view: ViewState
+  
+  // Version counters for memoization invalidation
+  _packetVersion: number
+  _flowVersion: number
+  _alertVersion: number
+  _filterVersion: number
   
   // Actions - Packets
   addPackets: (packets: Packet[]) => void
@@ -68,13 +76,6 @@ interface AppState {
   setFilter: (filter: Partial<FilterState>) => void
   clearFilters: () => void
   setTimeRange: (range: TimeRange) => void
-  
-  // Computed selectors
-  getFilteredPackets: () => Packet[]
-  getFilteredFlows: () => Flow[]
-  getFilteredAlerts: () => Alert[]
-  getSelectedPacket: () => Packet | null
-  getSelectedFlow: () => Flow | null
 }
 
 const initialStatistics: Statistics = {
@@ -121,7 +122,7 @@ const initialViewState: ViewState = {
 }
 
 export const useAppStore = create<AppState>()(
-  immer((set, get) => ({
+  immer((set) => ({
     // Initial state
     packets: new Map(),
     packetIds: [],
@@ -134,6 +135,12 @@ export const useAppStore = create<AppState>()(
     statistics: initialStatistics,
     capture: initialCaptureState,
     view: initialViewState,
+    
+    // Version counters for memoization
+    _packetVersion: 0,
+    _flowVersion: 0,
+    _alertVersion: 0,
+    _filterVersion: 0,
     
     // Packet actions
     addPackets: (newPackets) => set((state) => {
@@ -149,11 +156,15 @@ export const useAppStore = create<AppState>()(
           state.packets.delete(id)
         }
       }
+      
+      // Increment version for memoization
+      state._packetVersion++
     }),
     
     clearPackets: () => set((state) => {
       state.packets.clear()
       state.packetIds = []
+      state._packetVersion++
     }),
     
     // Flow actions
@@ -172,11 +183,14 @@ export const useAppStore = create<AppState>()(
           state.flows.delete(id)
         }
       }
+      
+      state._flowVersion++
     }),
     
     clearFlows: () => set((state) => {
       state.flows.clear()
       state.flowIds = []
+      state._flowVersion++
     }),
     
     // File actions
@@ -199,22 +213,25 @@ export const useAppStore = create<AppState>()(
           state.alerts.delete(id)
         }
       }
+      
+      state._alertVersion++
     }),
     
     clearAlerts: () => set((state) => {
       state.alerts.clear()
       state.alertIds = []
+      state._alertVersion++
     }),
     
     acknowledgeAlert: (id) => set((state) => {
       const alert = state.alerts.get(id)
       if (alert) {
-        // Update the alert with acknowledged status
         state.alerts.set(id, {
           ...alert,
           acknowledged: true,
-          acknowledgedAt: Date.now() * 1000000, // Convert to nanoseconds
+          acknowledgedAt: Date.now() * 1000000,
         })
+        state._alertVersion++
       }
     }),
     
@@ -270,143 +287,363 @@ export const useAppStore = create<AppState>()(
     // Filter actions
     setFilter: (filter) => set((state) => {
       Object.assign(state.view.filters, filter)
+      state._filterVersion++
     }),
     
     clearFilters: () => set((state) => {
       state.view.filters = initialViewState.filters
+      state._filterVersion++
     }),
     
     setTimeRange: (range) => set((state) => {
       state.view.timeRange = range
+      state._filterVersion++
     }),
-    
-    // Selectors
-    getFilteredPackets: () => {
-      const state = get()
-      const { filters } = state.view
-      // timeRange filtering can be added here if needed
-      
-      let packets = state.packetIds.map(id => state.packets.get(id)).filter((p): p is Packet => p !== undefined)
-      
-      // Apply search filter
-      if (filters.search) {
-        const search = filters.search.toLowerCase()
-        packets = packets.filter(p => 
-          p.srcIP.includes(search) ||
-          p.dstIP.includes(search) ||
-          p.protocol.toLowerCase().includes(search)
-        )
-      }
-      
-      // Apply protocol filter
-      if (filters.protocols.length > 0) {
-        packets = packets.filter(p => filters.protocols.includes(p.protocol))
-      }
-      
-      // Apply IP filters
-      if (filters.srcIP) {
-        packets = packets.filter(p => p.srcIP.includes(filters.srcIP))
-      }
-      if (filters.dstIP) {
-        packets = packets.filter(p => p.dstIP.includes(filters.dstIP))
-      }
-      
-      // Apply port filter
-      if (filters.port !== null) {
-        packets = packets.filter(p => 
-          p.srcPort === filters.port || p.dstPort === filters.port
-        )
-      }
-      
-      // Apply time range
-      const { timeRange } = state.view
-      if (timeRange.start !== null) {
-        packets = packets.filter(p => timeRange.start !== null && p.timestampNano >= timeRange.start)
-      }
-      if (timeRange.end !== null) {
-        packets = packets.filter(p => timeRange.end !== null && p.timestampNano <= timeRange.end)
-      }
-      
-      return packets
-    },
-    
-    getFilteredFlows: () => {
-      const state = get()
-      const { filters } = state.view
-      // timeRange filtering can be added here if needed
-      
-      let flows = state.flowIds.map(id => state.flows.get(id)).filter((f): f is Flow => f !== undefined)
-      
-      // Apply search filter
-      if (filters.search) {
-        const search = filters.search.toLowerCase()
-        flows = flows.filter(f => 
-          f.srcIP.includes(search) ||
-          f.dstIP.includes(search) ||
-          f.protocol.toLowerCase().includes(search) ||
-          f.metadata.serverName?.toLowerCase().includes(search) ||
-          f.metadata.httpHost?.toLowerCase().includes(search)
-        )
-      }
-      
-      // Apply protocol filter
-      if (filters.protocols.length > 0) {
-        flows = flows.filter(f => filters.protocols.includes(f.protocol))
-      }
-      
-      // Apply byte range filters
-      if (filters.minBytes !== null) {
-        flows = flows.filter(f => filters.minBytes !== null && f.byteCount >= filters.minBytes)
-      }
-      if (filters.maxBytes !== null) {
-        flows = flows.filter(f => filters.maxBytes !== null && f.byteCount <= filters.maxBytes)
-      }
-      
-      return flows
-    },
-    
-    getFilteredAlerts: () => {
-      const state = get()
-      const { filters } = state.view
-      
-      let alerts = state.alertIds.map(id => state.alerts.get(id)).filter((a): a is Alert => a !== undefined)
-      
-      // Apply severity filter
-      if (filters.severities.length > 0) {
-        alerts = alerts.filter(a => filters.severities.includes(a.severity))
-      }
-      
-      // Apply search filter
-      if (filters.search) {
-        const search = filters.search.toLowerCase()
-        alerts = alerts.filter(a => 
-          a.title.toLowerCase().includes(search) ||
-          a.description.toLowerCase().includes(search)
-        )
-      }
-      
-      return alerts
-    },
-    
-    getSelectedPacket: () => {
-      const state = get()
-      if (!state.view.selectedPacketId) return null
-      return state.packets.get(state.view.selectedPacketId) || null
-    },
-    
-    getSelectedFlow: () => {
-      const state = get()
-      if (!state.view.selectedFlowId) return null
-      return state.flows.get(state.view.selectedFlowId) || null
-    },
   }))
 )
 
-// Selector hooks for performance optimization
+// =============================================================================
+// Memoized Selector Hooks
+// These hooks use version counters to avoid recomputing on every render
+// =============================================================================
+
+/**
+ * Returns filtered packets with memoization.
+ * Only recomputes when packets or filters change.
+ */
+export function useFilteredPackets(): Packet[] {
+  const packets = useAppStore(state => state.packets)
+  const packetIds = useAppStore(state => state.packetIds)
+  const filters = useAppStore(state => state.view.filters, shallow)
+  const timeRange = useAppStore(state => state.view.timeRange, shallow)
+  const packetVersion = useAppStore(state => state._packetVersion)
+  const filterVersion = useAppStore(state => state._filterVersion)
+  
+  // Cache for memoization
+  const cacheRef = useRef<{
+    packetVersion: number
+    filterVersion: number
+    result: Packet[]
+  }>({ packetVersion: -1, filterVersion: -1, result: [] })
+  
+  return useMemo(() => {
+    // Return cached result if versions match
+    if (
+      cacheRef.current.packetVersion === packetVersion &&
+      cacheRef.current.filterVersion === filterVersion
+    ) {
+      return cacheRef.current.result
+    }
+    
+    let result = packetIds
+      .map(id => packets.get(id))
+      .filter((p): p is Packet => p !== undefined)
+    
+    // Apply search filter
+    if (filters.search) {
+      const search = filters.search.toLowerCase()
+      result = result.filter(p => 
+        p.srcIP.includes(search) ||
+        p.dstIP.includes(search) ||
+        p.protocol.toLowerCase().includes(search)
+      )
+    }
+    
+    // Apply protocol filter
+    if (filters.protocols.length > 0) {
+      result = result.filter(p => filters.protocols.includes(p.protocol))
+    }
+    
+    // Apply IP filters
+    if (filters.srcIP) {
+      result = result.filter(p => p.srcIP.includes(filters.srcIP))
+    }
+    if (filters.dstIP) {
+      result = result.filter(p => p.dstIP.includes(filters.dstIP))
+    }
+    
+    // Apply port filter
+    if (filters.port !== null) {
+      result = result.filter(p => 
+        p.srcPort === filters.port || p.dstPort === filters.port
+      )
+    }
+    
+    // Apply time range
+    if (timeRange.start !== null) {
+      const start = timeRange.start
+      result = result.filter(p => p.timestampNano >= start)
+    }
+    if (timeRange.end !== null) {
+      const end = timeRange.end
+      result = result.filter(p => p.timestampNano <= end)
+    }
+    
+    // Update cache
+    cacheRef.current = { packetVersion, filterVersion, result }
+    
+    return result
+  }, [packets, packetIds, filters, timeRange, packetVersion, filterVersion])
+}
+
+/**
+ * Returns filtered flows with memoization.
+ * Only recomputes when flows or filters change.
+ */
+export function useFilteredFlows(): Flow[] {
+  const flows = useAppStore(state => state.flows)
+  const flowIds = useAppStore(state => state.flowIds)
+  const filters = useAppStore(state => state.view.filters, shallow)
+  const flowVersion = useAppStore(state => state._flowVersion)
+  const filterVersion = useAppStore(state => state._filterVersion)
+  
+  const cacheRef = useRef<{
+    flowVersion: number
+    filterVersion: number
+    result: Flow[]
+  }>({ flowVersion: -1, filterVersion: -1, result: [] })
+  
+  return useMemo(() => {
+    if (
+      cacheRef.current.flowVersion === flowVersion &&
+      cacheRef.current.filterVersion === filterVersion
+    ) {
+      return cacheRef.current.result
+    }
+    
+    let result = flowIds
+      .map(id => flows.get(id))
+      .filter((f): f is Flow => f !== undefined)
+    
+    // Apply search filter
+    if (filters.search) {
+      const search = filters.search.toLowerCase()
+      result = result.filter(f => 
+        f.srcIP.includes(search) ||
+        f.dstIP.includes(search) ||
+        f.protocol.toLowerCase().includes(search) ||
+        f.metadata.serverName?.toLowerCase().includes(search) ||
+        f.metadata.httpHost?.toLowerCase().includes(search)
+      )
+    }
+    
+    // Apply protocol filter
+    if (filters.protocols.length > 0) {
+      result = result.filter(f => filters.protocols.includes(f.protocol))
+    }
+    
+    // Apply byte range filters
+    if (filters.minBytes !== null) {
+      const minBytes = filters.minBytes
+      result = result.filter(f => f.byteCount >= minBytes)
+    }
+    if (filters.maxBytes !== null) {
+      const maxBytes = filters.maxBytes
+      result = result.filter(f => f.byteCount <= maxBytes)
+    }
+    
+    cacheRef.current = { flowVersion, filterVersion, result }
+    
+    return result
+  }, [flows, flowIds, filters, flowVersion, filterVersion])
+}
+
+/**
+ * Returns filtered alerts with memoization.
+ * Only recomputes when alerts or filters change.
+ */
+export function useFilteredAlerts(): Alert[] {
+  const alerts = useAppStore(state => state.alerts)
+  const alertIds = useAppStore(state => state.alertIds)
+  const filters = useAppStore(state => state.view.filters, shallow)
+  const alertVersion = useAppStore(state => state._alertVersion)
+  const filterVersion = useAppStore(state => state._filterVersion)
+  
+  const cacheRef = useRef<{
+    alertVersion: number
+    filterVersion: number
+    result: Alert[]
+  }>({ alertVersion: -1, filterVersion: -1, result: [] })
+  
+  return useMemo(() => {
+    if (
+      cacheRef.current.alertVersion === alertVersion &&
+      cacheRef.current.filterVersion === filterVersion
+    ) {
+      return cacheRef.current.result
+    }
+    
+    let result = alertIds
+      .map(id => alerts.get(id))
+      .filter((a): a is Alert => a !== undefined)
+    
+    // Apply severity filter
+    if (filters.severities.length > 0) {
+      result = result.filter(a => filters.severities.includes(a.severity))
+    }
+    
+    // Apply search filter
+    if (filters.search) {
+      const search = filters.search.toLowerCase()
+      result = result.filter(a => 
+        a.title.toLowerCase().includes(search) ||
+        a.description.toLowerCase().includes(search)
+      )
+    }
+    
+    cacheRef.current = { alertVersion, filterVersion, result }
+    
+    return result
+  }, [alerts, alertIds, filters, alertVersion, filterVersion])
+}
+
+/**
+ * Returns the selected packet with memoization.
+ */
+export function useSelectedPacket(): Packet | null {
+  const selectedId = useAppStore(state => state.view.selectedPacketId)
+  const packets = useAppStore(state => state.packets)
+  
+  return useMemo(() => {
+    if (!selectedId) return null
+    return packets.get(selectedId) ?? null
+  }, [selectedId, packets])
+}
+
+/**
+ * Returns the selected flow with memoization.
+ */
+export function useSelectedFlow(): Flow | null {
+  const selectedId = useAppStore(state => state.view.selectedFlowId)
+  const flows = useAppStore(state => state.flows)
+  
+  return useMemo(() => {
+    if (!selectedId) return null
+    return flows.get(selectedId) ?? null
+  }, [selectedId, flows])
+}
+
+// =============================================================================
+// Simple Selector Hooks (no filtering, just subscriptions)
+// =============================================================================
+
 export const usePacketCount = () => useAppStore(state => state.packetIds.length)
 export const useFlowCount = () => useAppStore(state => state.flowIds.length)
 export const useAlertCount = () => useAppStore(state => state.alertIds.length)
 export const useCaptureState = () => useAppStore(state => state.capture)
 export const useStatistics = () => useAppStore(state => state.statistics)
 export const useActiveView = () => useAppStore(state => state.view.activeView)
-export const useFilters = () => useAppStore(state => state.view.filters)
+export const useFilters = () => useAppStore(state => state.view.filters, shallow)
+export const useTimeRange = () => useAppStore(state => state.view.timeRange, shallow)
+export const useTopology = () => useAppStore(state => state.topology)
+
+// =============================================================================
+// Legacy getters for backward compatibility (deprecated, use hooks instead)
+// =============================================================================
+
+/** @deprecated Use useFilteredPackets() hook instead */
+export const getFilteredPackets = () => {
+  const state = useAppStore.getState()
+  const { filters, timeRange } = state.view
+  
+  let packets = state.packetIds
+    .map(id => state.packets.get(id))
+    .filter((p): p is Packet => p !== undefined)
+  
+  if (filters.search) {
+    const search = filters.search.toLowerCase()
+    packets = packets.filter(p => 
+      p.srcIP.includes(search) ||
+      p.dstIP.includes(search) ||
+      p.protocol.toLowerCase().includes(search)
+    )
+  }
+  
+  if (filters.protocols.length > 0) {
+    packets = packets.filter(p => filters.protocols.includes(p.protocol))
+  }
+  
+  if (filters.srcIP) {
+    packets = packets.filter(p => p.srcIP.includes(filters.srcIP))
+  }
+  if (filters.dstIP) {
+    packets = packets.filter(p => p.dstIP.includes(filters.dstIP))
+  }
+  
+  if (filters.port !== null) {
+    packets = packets.filter(p => 
+      p.srcPort === filters.port || p.dstPort === filters.port
+    )
+  }
+  
+  if (timeRange.start !== null) {
+    const start = timeRange.start
+    packets = packets.filter(p => p.timestampNano >= start)
+  }
+  if (timeRange.end !== null) {
+    const end = timeRange.end
+    packets = packets.filter(p => p.timestampNano <= end)
+  }
+  
+  return packets
+}
+
+/** @deprecated Use useFilteredFlows() hook instead */
+export const getFilteredFlows = () => {
+  const state = useAppStore.getState()
+  const { filters } = state.view
+  
+  let flows = state.flowIds
+    .map(id => state.flows.get(id))
+    .filter((f): f is Flow => f !== undefined)
+  
+  if (filters.search) {
+    const search = filters.search.toLowerCase()
+    flows = flows.filter(f => 
+      f.srcIP.includes(search) ||
+      f.dstIP.includes(search) ||
+      f.protocol.toLowerCase().includes(search) ||
+      f.metadata.serverName?.toLowerCase().includes(search) ||
+      f.metadata.httpHost?.toLowerCase().includes(search)
+    )
+  }
+  
+  if (filters.protocols.length > 0) {
+    flows = flows.filter(f => filters.protocols.includes(f.protocol))
+  }
+  
+  if (filters.minBytes !== null) {
+    const minBytes = filters.minBytes
+    flows = flows.filter(f => f.byteCount >= minBytes)
+  }
+  if (filters.maxBytes !== null) {
+    const maxBytes = filters.maxBytes
+    flows = flows.filter(f => f.byteCount <= maxBytes)
+  }
+  
+  return flows
+}
+
+/** @deprecated Use useFilteredAlerts() hook instead */
+export const getFilteredAlerts = () => {
+  const state = useAppStore.getState()
+  const { filters } = state.view
+  
+  let alerts = state.alertIds
+    .map(id => state.alerts.get(id))
+    .filter((a): a is Alert => a !== undefined)
+  
+  if (filters.severities.length > 0) {
+    alerts = alerts.filter(a => filters.severities.includes(a.severity))
+  }
+  
+  if (filters.search) {
+    const search = filters.search.toLowerCase()
+    alerts = alerts.filter(a => 
+      a.title.toLowerCase().includes(search) ||
+      a.description.toLowerCase().includes(search)
+    )
+  }
+  
+  return alerts
+}

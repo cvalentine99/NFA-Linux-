@@ -1,6 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useAppStore } from '@/stores/appStore'
+import { useAppStore, useFilteredPackets } from '@/stores/appStore'
 import type { Packet, Protocol } from '@/types'
 import { clsx } from 'clsx'
 
@@ -33,8 +33,8 @@ const ROW_HEIGHT = 32
 export function PacketTable() {
   const parentRef = useRef<HTMLDivElement>(null)
   
-  // Get filtered packets from store
-  const packets = useAppStore(state => state.getFilteredPackets())
+  // Get filtered packets from store (memoized)
+  const packets = useFilteredPackets()
   const selectedPacketId = useAppStore(state => state.view.selectedPacketId)
   const selectPacket = useAppStore(state => state.selectPacket)
   
@@ -68,7 +68,7 @@ export function PacketTable() {
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!selectedPacketId) return
     
-    const currentIndex = packets.findIndex(p => p.id === selectedPacketId)
+    const currentIndex = packets.findIndex((p: Packet) => p.id === selectedPacketId)
     if (currentIndex === -1) return
     
     if (e.key === 'ArrowDown' && currentIndex < packets.length - 1) {
@@ -182,7 +182,7 @@ export function PacketTable() {
         {packets.length.toLocaleString()} packets
         {selectedPacketId && (
           <span className="ml-2">
-            • Selected: #{packets.findIndex(p => p.id === selectedPacketId) + 1}
+            • Selected: #{packets.findIndex((p: Packet) => p.id === selectedPacketId) + 1}
           </span>
         )}
       </div>

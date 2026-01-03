@@ -9,6 +9,8 @@ import (
 	"time"
 
 	ort "github.com/yalue/onnxruntime_go"
+
+	"github.com/cvalentine99/nfa-linux/internal/config"
 )
 
 // ONNXConfig holds configuration for the ONNX Runtime engine
@@ -36,7 +38,7 @@ type ONNXConfig struct {
 // DefaultONNXConfig returns a default configuration
 func DefaultONNXConfig() *ONNXConfig {
 	return &ONNXConfig{
-		SharedLibraryPath: "/usr/lib/libonnxruntime.so",
+		SharedLibraryPath: config.Paths.ONNXLibraryPath,
 		NumThreads:        4,
 		BatchSize:         32,
 		UseGPU:            false,

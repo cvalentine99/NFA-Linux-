@@ -23,6 +23,7 @@ import (
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/zeebo/blake3"
 
+	"github.com/cvalentine99/nfa-linux/internal/config"
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
@@ -82,7 +83,7 @@ type CarverConfig struct {
 // DefaultCarverConfig returns a sensible default configuration.
 func DefaultCarverConfig() *CarverConfig {
 	return &CarverConfig{
-		OutputDir:          "/tmp/nfa-carved",
+		OutputDir:          config.Paths.CarvedFilesDir,
 		MaxFileSize:        100 * 1024 * 1024, // 100MB
 		MinFileSize:        100,               // 100 bytes
 		EnableHashing:      true,

@@ -1,6 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useAppStore } from '@/stores/appStore'
+import { useAppStore, useFilteredAlerts } from '@/stores/appStore'
 import type { Alert, AlertSeverity, AlertCategory } from '@/types'
 import { clsx } from 'clsx'
 import { AlertTriangle, Shield, Bug, Wifi, Eye, Skull, FileWarning } from 'lucide-react'
@@ -32,8 +32,8 @@ const ROW_HEIGHT = 64
 export function AlertTable() {
   const parentRef = useRef<HTMLDivElement>(null)
   
-  // Get filtered alerts from store
-  const alerts = useAppStore(state => state.getFilteredAlerts())
+  // Get filtered alerts from store (memoized)
+  const alerts = useFilteredAlerts()
   const selectedAlertId = useAppStore(state => state.view.selectedAlertId)
   const selectAlert = useAppStore(state => state.selectAlert)
   

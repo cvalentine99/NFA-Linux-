@@ -1,6 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useAppStore } from '@/stores/appStore'
+import { useAppStore, useFilteredFlows } from '@/stores/appStore'
 import type { Flow, Protocol, FlowState } from '@/types'
 import { clsx } from 'clsx'
 import { ArrowRight, Lock } from 'lucide-react'
@@ -44,8 +44,8 @@ const ROW_HEIGHT = 40
 export function FlowTable() {
   const parentRef = useRef<HTMLDivElement>(null)
   
-  // Get filtered flows from store
-  const flows = useAppStore(state => state.getFilteredFlows())
+  // Get filtered flows from store (memoized)
+  const flows = useFilteredFlows()
   const selectedFlowId = useAppStore(state => state.view.selectedFlowId)
   const selectFlow = useAppStore(state => state.selectFlow)
   

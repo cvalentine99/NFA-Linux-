@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cvalentine99/nfa-linux/internal/config"
 )
 
 // Profiler manages runtime profiling for NFA-Linux
@@ -73,7 +75,7 @@ func DefaultConfig() *Config {
 		EnableHTTP:        true,
 		HTTPAddr:          "localhost:6060",
 		EnableFile:        false,
-		OutputDir:         "/tmp/nfa-profiles",
+		OutputDir:         config.Paths.ProfilesDir,
 		ProfileName:       "nfa",
 		CPUProfile:        true,
 		CPUProfileRate:    100,

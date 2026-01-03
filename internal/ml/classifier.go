@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
@@ -86,9 +87,9 @@ type TrafficClassifier struct {
 	// Application to category mapping
 	appCategories map[string]TrafficCategory
 	
-	// Statistics
-	classificationCount int64
-	totalLatency        time.Duration
+	// Statistics (use atomic for lock-free updates)
+	classificationCount atomic.Int64
+	totalLatencyNanos   atomic.Int64
 }
 
 // protocolSignature defines a signature for protocol detection
@@ -315,10 +316,9 @@ func (c *TrafficClassifier) SetONNXEngine(engine *ONNXEngine) {
 func (c *TrafficClassifier) Classify(ctx context.Context, flow *models.Flow) (*ClassificationResult, error) {
 	start := time.Now()
 	defer func() {
-		c.mu.Lock()
-		c.classificationCount++
-		c.totalLatency += time.Since(start)
-		c.mu.Unlock()
+		// Use atomic operations for lock-free statistics updates
+		c.classificationCount.Add(1)
+		c.totalLatencyNanos.Add(time.Since(start).Nanoseconds())
 	}()
 
 	result := &ClassificationResult{
@@ -570,17 +570,19 @@ func (c *TrafficClassifier) getCategory(app string) TrafficCategory {
 
 // GetStatistics returns classification statistics
 func (c *TrafficClassifier) GetStatistics() ClassifierStats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	// Atomic reads - no lock needed
+	count := c.classificationCount.Load()
+	totalNanos := c.totalLatencyNanos.Load()
+	totalLatency := time.Duration(totalNanos)
 
 	var avgLatency time.Duration
-	if c.classificationCount > 0 {
-		avgLatency = c.totalLatency / time.Duration(c.classificationCount)
+	if count > 0 {
+		avgLatency = totalLatency / time.Duration(count)
 	}
 
 	return ClassifierStats{
-		ClassificationCount: c.classificationCount,
-		TotalLatency:        c.totalLatency,
+		ClassificationCount: count,
+		TotalLatency:        totalLatency,
 		AverageLatency:      avgLatency,
 	}
 }

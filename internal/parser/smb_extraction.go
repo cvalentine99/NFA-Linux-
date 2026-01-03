@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cvalentine99/nfa-linux/internal/config"
 )
 
 // Lateral movement indicators
@@ -119,7 +121,7 @@ type SMBFileExtractorConfig struct {
 // DefaultSMBFileExtractorConfig returns default configuration.
 func DefaultSMBFileExtractorConfig() *SMBFileExtractorConfig {
 	return &SMBFileExtractorConfig{
-		OutputDir:   "/tmp/nfa-extracted",
+		OutputDir:   config.Paths.ExtractedFilesDir,
 		MaxFileSize: 100 * 1024 * 1024, // 100MB
 		Enabled:     true,
 	}
