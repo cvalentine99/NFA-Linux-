@@ -26,7 +26,8 @@ check_binary() {
         echo "Error: Binary not found at $BUILD_DIR/bin/nfa-linux"
         echo "Building with Wails..."
         cd "$PROJECT_ROOT"
-        wails build -clean
+        # Use webkit2_41 tag for Ubuntu 24.04+ compatibility
+        wails build -clean -tags webkit2_41
     fi
 }
 

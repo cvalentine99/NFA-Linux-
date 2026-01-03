@@ -41,8 +41,14 @@ sudo apt-get install -y \
 The packaging scripts require a pre-built Wails binary. If not present, run:
 
 ```bash
+# For Ubuntu 24.04+ / Debian 13+ (webkit2gtk-4.1)
+wails build -clean -tags webkit2_41
+
+# For Ubuntu 22.04 / Debian 12 (webkit2gtk-4.0)
 wails build -clean
 ```
+
+**Important:** Ubuntu 24.04 and newer require the `-tags webkit2_41` flag because `libwebkit2gtk-4.0` was removed in favor of `libwebkit2gtk-4.1`.
 
 ## Debian Package
 

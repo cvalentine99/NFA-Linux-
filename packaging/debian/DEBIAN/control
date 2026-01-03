@@ -3,7 +3,7 @@ Version: 1.0.0
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: libgtk-3-0 (>= 3.22), libwebkit2gtk-4.0-37 (>= 2.28), libpcap0.8
+Depends: libgtk-3-0 (>= 3.22), libwebkit2gtk-4.1-0 (>= 2.40), libpcap0.8
 Recommends: wireshark-common
 Suggests: tshark
 Maintainer: NFA-Linux Team <team@nfa-linux.io>
@@ -22,3 +22,5 @@ Description: Network Forensics Analyzer - Next Generation Packet Analysis
   - File carving and extraction
  .
  This package includes the desktop GUI application built with Wails.
+ .
+ Supported on Ubuntu 22.04+ and Debian 12+.
