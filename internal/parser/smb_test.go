@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 )
@@ -246,9 +247,13 @@ func TestSMBParser_CleanupExpired(t *testing.T) {
 func TestSMBParser_LateralMovementDetection(t *testing.T) {
 	parser := NewSMBParser(nil)
 	
+	// RACE FIX: Use mutex to protect detectedMove which is written by goroutine
+	var mu sync.Mutex
 	var detectedMove string
 	parser.SetLateralMovementHandler(func(session *SMBSession, indicator string) {
+		mu.Lock()
 		detectedMove = indicator
+		mu.Unlock()
 	})
 	
 	// Add a session
@@ -266,7 +271,12 @@ func TestSMBParser_LateralMovementDetection(t *testing.T) {
 	// Give callback time to execute
 	time.Sleep(10 * time.Millisecond)
 	
-	if detectedMove == "" {
+	// RACE FIX: Read with lock protection
+	mu.Lock()
+	result := detectedMove
+	mu.Unlock()
+	
+	if result == "" {
 		t.Error("Expected lateral movement detection for ADMIN$ share")
 	}
 }

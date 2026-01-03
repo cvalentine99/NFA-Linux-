@@ -949,12 +949,29 @@ func (p *SMBParser) checkLateralMovement(sessionID uint64, shareName string) {
 	for _, suspicious := range suspiciousShares {
 		if strings.Contains(shareUpper, suspicious) {
 			p.mu.RLock()
-			if session, ok := p.sessions[sessionID]; ok {
-				if p.onLateralMove != nil {
-					go p.onLateralMove(session, fmt.Sprintf("AdminShare:%s", shareName))
-				}
-			}
+			session, ok := p.sessions[sessionID]
+			handler := p.onLateralMove
 			p.mu.RUnlock()
+			
+				if ok && handler != nil {
+					// RACE FIX: Copy session data to avoid race with concurrent modifications
+					// The goroutine was reading session fields while main thread could modify them
+					sessionCopy := &SMBSession{
+						SessionID:      session.SessionID,
+						UserName:       session.UserName,
+						Domain:         session.Domain,
+						WorkStation:    session.WorkStation,
+						ClientIP:       session.ClientIP,
+						ServerIP:       session.ServerIP,
+						Dialect:        session.Dialect,
+						Encrypted:      session.Encrypted,
+						SigningEnabled: session.SigningEnabled,
+						StartTimeNano:  session.StartTimeNano,
+						LastSeenNano:   session.LastSeenNano,
+					}
+					indicator := fmt.Sprintf("AdminShare:%s", shareName)
+					go handler(sessionCopy, indicator)
+				}
 			break
 		}
 	}

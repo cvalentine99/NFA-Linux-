@@ -915,6 +915,11 @@ func (d *SMBLateralMovementDetector) ProcessEvent(event *LateralMovementEvent) {
 	// Check for alert threshold
 	score := activity.AdminShareHits*2 + activity.PipeAccesses*3 + activity.FileUploads*2
 	if score >= d.alertThreshold && d.onAlert != nil {
+		// RACE FIX: Copy events slice to avoid race with subsequent modifications
+		// The goroutine reads from the slice after the lock is released
+		eventsCopy := make([]*LateralMovementEvent, len(activity.Events))
+		copy(eventsCopy, activity.Events)
+		
 		alert := &LateralMovementAlert{
 			SessionID:     event.SessionID,
 			UserName:      event.UserName,
@@ -922,7 +927,7 @@ func (d *SMBLateralMovementDetector) ProcessEvent(event *LateralMovementEvent) {
 			SourceIP:      event.SourceIP,
 			DestIP:        event.DestIP,
 			Score:         score,
-			Events:        activity.Events,
+			Events:        eventsCopy,
 			Summary:       d.generateSummary(activity),
 			TimestampNano: event.TimestampNano,
 		}
