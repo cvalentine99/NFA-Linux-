@@ -569,6 +569,161 @@ func (p *RawDNSPacket) IsResponse() bool {
 	return p.Flags&0x8000 != 0
 }
 
+// =============================================================================
+// Integrated Parsing with Compression Protection
+// =============================================================================
+
+// ParseWithProtection parses DNS from raw bytes with full compression protection.
+// This should be used for untrusted input where gopacket's parsing might be bypassed.
+func (p *DNSParser) ParseWithProtection(data []byte, srcIP, dstIP net.IP, timestampNano int64) ([]*models.DNSRecord, error) {
+	// First, validate the raw packet structure with our protected parser
+	rawPkt, err := p.ParseRawDNS(data)
+	if err != nil {
+		return nil, fmt.Errorf("DNS validation failed: %w", err)
+	}
+	
+	// Convert raw packet to models
+	var records []*models.DNSRecord
+	
+	for _, q := range rawPkt.Questions {
+		record := &models.DNSRecord{
+			QueryName:     q.Name,
+			QueryType:     dnsTypeName(q.Type),
+			ResponseCode:  dnsRcodeName(rawPkt.ResponseCode()),
+			ClientIP:      srcIP,
+			ServerIP:      dstIP,
+			TimestampNano: timestampNano,
+		}
+		
+		// If response, extract answers
+		if rawPkt.IsResponse() {
+			record.ClientIP = dstIP
+			record.ServerIP = srcIP
+			record.Answers = p.extractRawAnswers(rawPkt.Answers, q.Name, q.Type)
+			if len(rawPkt.Answers) > 0 {
+				record.TTL = rawPkt.Answers[0].TTL
+			}
+		}
+		
+		records = append(records, record)
+		
+		// PII scanning
+		if p.piiEnabled && p.piiDetector != nil {
+			p.scanDNSForPII(q.Name, timestampNano, srcIP, dstIP)
+		}
+		
+		if p.onRecord != nil {
+			p.onRecord(record)
+		}
+	}
+	
+	return records, nil
+}
+
+// extractRawAnswers extracts answer strings from raw DNS resource records.
+func (p *DNSParser) extractRawAnswers(answers []RawDNSResourceRecord, queryName string, queryType uint16) []string {
+	var result []string
+	
+	for _, ans := range answers {
+		// Match query name (case-insensitive)
+		if !strings.EqualFold(ans.Name, queryName) {
+			continue
+		}
+		
+		switch ans.Type {
+		case 1: // A record
+			if len(ans.RData) == 4 {
+				ip := net.IP(ans.RData)
+				result = append(result, ip.String())
+			}
+		case 28: // AAAA record
+			if len(ans.RData) == 16 {
+				ip := net.IP(ans.RData)
+				result = append(result, ip.String())
+			}
+		case 5: // CNAME
+			// CNAME rdata is a compressed name, need to decode
+			// For safety, just use the raw bytes as string if short enough
+			if len(ans.RData) > 0 && len(ans.RData) <= MaxDNSNameLength {
+				result = append(result, string(ans.RData))
+			}
+		case 16: // TXT
+			// TXT records have length-prefixed strings
+			offset := 0
+			for offset < len(ans.RData) {
+				if offset >= len(ans.RData) {
+					break
+				}
+				txtLen := int(ans.RData[offset])
+				offset++
+				if offset+txtLen > len(ans.RData) {
+					break
+				}
+				result = append(result, string(ans.RData[offset:offset+txtLen]))
+				offset += txtLen
+			}
+		case 15: // MX
+			if len(ans.RData) >= 3 {
+				pref := uint16(ans.RData[0])<<8 | uint16(ans.RData[1])
+				result = append(result, fmt.Sprintf("%d %s", pref, string(ans.RData[2:])))
+			}
+		}
+	}
+	
+	return result
+}
+
+// dnsTypeName returns the string name for a DNS type.
+func dnsTypeName(t uint16) string {
+	names := map[uint16]string{
+		1:   "A",
+		2:   "NS",
+		5:   "CNAME",
+		6:   "SOA",
+		12:  "PTR",
+		15:  "MX",
+		16:  "TXT",
+		28:  "AAAA",
+		33:  "SRV",
+		35:  "NAPTR",
+		43:  "DS",
+		46:  "RRSIG",
+		47:  "NSEC",
+		48:  "DNSKEY",
+		50:  "NSEC3",
+		52:  "TLSA",
+		65:  "HTTPS",
+		99:  "SPF",
+		255: "ANY",
+		256: "URI",
+		257: "CAA",
+	}
+	if name, ok := names[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("TYPE%d", t)
+}
+
+// dnsRcodeName returns the string name for a DNS response code.
+func dnsRcodeName(rcode int) string {
+	names := map[int]string{
+		0: "NoError",
+		1: "FormErr",
+		2: "ServFail",
+		3: "NXDomain",
+		4: "NotImp",
+		5: "Refused",
+		6: "YXDomain",
+		7: "YXRRSet",
+		8: "NXRRSet",
+		9: "NotAuth",
+	}
+	if name, ok := names[rcode]; ok {
+		return name
+	}
+	return fmt.Sprintf("RCODE%d", rcode)
+}
+
 // ResponseCode returns the DNS response code.
 func (p *RawDNSPacket) ResponseCode() int {
 	return int(p.Flags & 0x000F)
