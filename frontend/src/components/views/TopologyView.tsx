@@ -1,12 +1,51 @@
 import { useAppStore } from '@/stores/appStore'
-import { NetworkGraph } from '@/components/topology/NetworkGraph'
 import { TopologyControls } from '@/components/topology/TopologyControls'
 import { NodeDetail } from '@/components/topology/NodeDetail'
-import { useState } from 'react'
+import { useState, lazy, Suspense } from 'react'
+
+// Lazy load NetworkGraph to prevent WebGPU/Three.js from breaking the app
+// WebKit2GTK doesn't support WebGPU which Three.js 0.160+ tries to use
+const NetworkGraph = lazy(() => import('@/components/topology/NetworkGraph').then(m => ({ default: m.NetworkGraph })))
+
+// Fallback component when 3D graph fails to load
+function GraphFallback() {
+  return (
+    <div className="h-full flex items-center justify-center bg-surface">
+      <div className="text-center p-8">
+        <div className="text-6xl mb-4">🌐</div>
+        <h3 className="text-lg font-semibold text-text-primary mb-2">
+          3D Topology View
+        </h3>
+        <p className="text-text-secondary text-sm max-w-md">
+          Loading network topology visualization...
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// Error boundary for when WebGPU/Three.js fails
+function GraphError() {
+  return (
+    <div className="h-full flex items-center justify-center bg-surface">
+      <div className="text-center p-8">
+        <div className="text-6xl mb-4">⚠️</div>
+        <h3 className="text-lg font-semibold text-text-primary mb-2">
+          3D View Unavailable
+        </h3>
+        <p className="text-text-secondary text-sm max-w-md">
+          Your browser doesn't support WebGL/WebGPU required for 3D visualization.
+          Network data is still being captured and analyzed.
+        </p>
+      </div>
+    </div>
+  )
+}
 
 export function TopologyView() {
   const topology = useAppStore(state => state.topology)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [graphError, setGraphError] = useState(false)
   
   const selectedNodeData = selectedNode 
     ? topology.nodes.find(n => n.id === selectedNode) 
@@ -21,13 +60,21 @@ export function TopologyView() {
           <TopologyControls />
         </div>
         
-        {/* 3D Network graph */}
-        <NetworkGraph
-          nodes={topology.nodes}
-          links={topology.links}
-          onNodeClick={setSelectedNode}
-          selectedNode={selectedNode}
-        />
+        {/* 3D Network graph with error handling */}
+        {graphError ? (
+          <GraphError />
+        ) : (
+          <Suspense fallback={<GraphFallback />}>
+            <ErrorBoundary onError={() => setGraphError(true)}>
+              <NetworkGraph
+                nodes={topology.nodes}
+                links={topology.links}
+                onNodeClick={setSelectedNode}
+                selectedNode={selectedNode}
+              />
+            </ErrorBoundary>
+          </Suspense>
+        )}
       </div>
       
       {/* Node detail panel */}
@@ -44,4 +91,38 @@ export function TopologyView() {
       )}
     </div>
   )
+}
+
+// Simple error boundary component
+import { Component, ReactNode } from 'react'
+
+interface ErrorBoundaryProps {
+  children: ReactNode
+  onError: () => void
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props)
+    this.state = { hasError: false }
+  }
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true }
+  }
+
+  componentDidCatch(): void {
+    this.props.onError()
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return null
+    }
+    return this.props.children
+  }
 }
