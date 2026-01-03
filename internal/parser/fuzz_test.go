@@ -328,6 +328,194 @@ func FuzzHTTPGzipDecompress(f *testing.F) {
 }
 
 // =============================================================================
+// Additional Edge Case Fuzzing
+// =============================================================================
+
+// FuzzDNSCompressionPointer specifically targets compression pointer attacks.
+func FuzzDNSCompressionPointer(f *testing.F) {
+	// Self-referencing pointer at offset 12
+	f.Add([]byte{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xc0, 0x0c,
+	})
+	
+	// Forward pointer (invalid)
+	f.Add([]byte{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xc0, 0xff,
+	})
+	
+	// Nested pointers
+	f.Add([]byte{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x03, 'w', 'w', 'w', 0xc0, 0x10, // Points to next
+		0x03, 'c', 'o', 'm', 0x00,
+	})
+	
+	parser := NewDNSParser()
+	
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Should handle any compression pointer pattern without panic or infinite loop
+		_, _ = parser.ParseRawDNS(data)
+	})
+}
+
+// FuzzHTTPChunkedEncoding specifically targets chunked transfer encoding.
+func FuzzHTTPChunkedEncoding(f *testing.F) {
+	// Valid chunked
+	f.Add([]byte("5\r\nhello\r\n0\r\n\r\n"))
+	
+	// Invalid chunk size
+	f.Add([]byte("ffffffff\r\ndata\r\n"))
+	
+	// Missing CRLF
+	f.Add([]byte("5\nhello\n0\n\n"))
+	
+	// Negative-looking size
+	f.Add([]byte("-1\r\n\r\n"))
+	
+	// Chunk extensions
+	f.Add([]byte("5;ext=value\r\nhello\r\n0\r\n\r\n"))
+	
+	parser := NewHTTPParser()
+	
+	f.Fuzz(func(t *testing.T, data []byte) {
+		request := "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n" + string(data)
+		_, _ = parser.ParseRequest([]byte(request), 0)
+	})
+}
+
+// FuzzTLSExtensions specifically targets TLS extension parsing.
+func FuzzTLSExtensions(f *testing.F) {
+	// SNI extension
+	f.Add([]byte{0x00, 0x00, 0x00, 0x0e, 0x00, 0x0c, 0x00, 0x00, 0x09, 't', 'e', 's', 't', '.', 'c', 'o', 'm'})
+	
+	// Supported versions extension
+	f.Add([]byte{0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04})
+	
+	// ALPN extension
+	f.Add([]byte{0x00, 0x10, 0x00, 0x0b, 0x00, 0x09, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'})
+	
+	// Key share extension (large)
+	f.Add(append([]byte{0x00, 0x33, 0x00, 0x45, 0x00, 0x43, 0x00, 0x1d, 0x00, 0x20}, make([]byte, 32)...))
+	
+	// Empty extension
+	f.Add([]byte{0x00, 0x00, 0x00, 0x00})
+	
+	// Oversized extension length
+	f.Add([]byte{0x00, 0x00, 0xff, 0xff})
+	
+	parser := NewTLSParser()
+	
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Build a ClientHello with the fuzzed extensions
+		clientHello := buildClientHelloWithExtensions(data)
+		_, _ = parser.ParseClientHello(clientHello, 0)
+	})
+}
+
+// buildClientHelloWithExtensions creates a ClientHello with given extensions.
+func buildClientHelloWithExtensions(extensions []byte) []byte {
+	var buf bytes.Buffer
+	
+	// Record header
+	buf.WriteByte(0x16)       // Handshake
+	buf.Write([]byte{0x03, 0x01}) // TLS 1.0
+	
+	// Calculate lengths
+	handshakeLen := 38 + 2 + len(extensions) // Fixed fields + extensions length + extensions
+	buf.WriteByte(byte(handshakeLen >> 8))
+	buf.WriteByte(byte(handshakeLen))
+	
+	// Handshake header
+	buf.WriteByte(0x01) // ClientHello
+	buf.WriteByte(0x00)
+	buf.WriteByte(byte((handshakeLen - 4) >> 8))
+	buf.WriteByte(byte(handshakeLen - 4))
+	
+	// ClientHello
+	buf.Write([]byte{0x03, 0x03}) // TLS 1.2
+	buf.Write(make([]byte, 32))   // Random
+	buf.WriteByte(0x00)           // Session ID length
+	buf.Write([]byte{0x00, 0x02, 0x00, 0x2f}) // Cipher suites
+	buf.Write([]byte{0x01, 0x00}) // Compression
+	
+	// Extensions
+	buf.WriteByte(byte(len(extensions) >> 8))
+	buf.WriteByte(byte(len(extensions)))
+	buf.Write(extensions)
+	
+	return buf.Bytes()
+}
+
+// FuzzQUICVarint specifically targets QUIC variable-length integer parsing.
+func FuzzQUICVarint(f *testing.F) {
+	// 1-byte varint
+	f.Add([]byte{0x00})
+	f.Add([]byte{0x3f})
+	
+	// 2-byte varint
+	f.Add([]byte{0x40, 0x00})
+	f.Add([]byte{0x7f, 0xff})
+	
+	// 4-byte varint
+	f.Add([]byte{0x80, 0x00, 0x00, 0x00})
+	f.Add([]byte{0xbf, 0xff, 0xff, 0xff})
+	
+	// 8-byte varint
+	f.Add([]byte{0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	
+	// Truncated
+	f.Add([]byte{0x40})
+	f.Add([]byte{0x80, 0x00})
+	
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = decodeQUICVarintFuzz(data)
+	})
+}
+
+// decodeQUICVarintFuzz decodes a QUIC variable-length integer (fuzz test version).
+func decodeQUICVarintFuzz(data []byte) (uint64, int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+	
+	prefix := data[0] >> 6
+	var length int
+	switch prefix {
+	case 0:
+		length = 1
+	case 1:
+		length = 2
+	case 2:
+		length = 4
+	case 3:
+		length = 8
+	}
+	
+	if len(data) < length {
+		return 0, 0
+	}
+	
+	var value uint64
+	switch length {
+	case 1:
+		value = uint64(data[0] & 0x3f)
+	case 2:
+		value = uint64(data[0]&0x3f)<<8 | uint64(data[1])
+	case 4:
+		value = uint64(data[0]&0x3f)<<24 | uint64(data[1])<<16 | uint64(data[2])<<8 | uint64(data[3])
+	case 8:
+		value = uint64(data[0]&0x3f)<<56 | uint64(data[1])<<48 | uint64(data[2])<<40 | uint64(data[3])<<32 |
+			uint64(data[4])<<24 | uint64(data[5])<<16 | uint64(data[6])<<8 | uint64(data[7])
+	}
+	
+	return value, length
+}
+
+// =============================================================================
 // Corpus Generation Helpers
 // =============================================================================
 
