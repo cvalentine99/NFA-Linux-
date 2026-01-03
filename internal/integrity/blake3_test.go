@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+func init() {
+	// Allow /tmp for testing
+	AllowedBasePaths = append(AllowedBasePaths, "/tmp")
+}
+
 func TestBLAKE3Hasher(t *testing.T) {
 	hasher := NewBLAKE3Hasher()
 

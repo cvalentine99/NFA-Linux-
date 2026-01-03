@@ -209,8 +209,13 @@ func TestNewCredential(t *testing.T) {
 		t.Errorf("Expected username admin, got %s", cred.Username)
 	}
 
-	if cred.Password != "password123" {
-		t.Errorf("Expected password password123, got %s", cred.Password)
+	// Password is now hashed for security (SEC-2 fix)
+	if cred.PasswordHash == "" {
+		t.Error("Expected password hash to be set")
+	}
+	// Verify it's a SHA-256 hash (64 hex characters)
+	if len(cred.PasswordHash) != 64 {
+		t.Errorf("Expected 64 char SHA-256 hash, got %d chars", len(cred.PasswordHash))
 	}
 
 	if cred.Protocol != "HTTP" {

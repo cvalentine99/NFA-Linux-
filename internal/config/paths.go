@@ -172,3 +172,57 @@ NFA-Linux Path Configuration Environment Variables:
   NFA_LOG_DIR            Directory for log files
                          Default: ~/.cache/nfa-linux/logs
 `
+
+
+// Global default config instance
+var defaultConfig *PathConfig
+
+func init() {
+	defaultConfig = DefaultPathConfig()
+}
+
+// GetONNXLibraryPath returns the configured ONNX library path.
+func GetONNXLibraryPath() string {
+	return defaultConfig.ONNXLibraryPath
+}
+
+// GetCarvedDir returns the configured carved files directory.
+func GetCarvedDir() string {
+	return defaultConfig.CarvedFilesDir
+}
+
+// GetExtractedDir returns the configured extracted files directory.
+func GetExtractedDir() string {
+	return defaultConfig.ExtractedFilesDir
+}
+
+// GetProfilesDir returns the configured profiles directory.
+func GetProfilesDir() string {
+	return defaultConfig.ProfilesDir
+}
+
+// GetEvidenceDir returns the configured evidence directory.
+func GetEvidenceDir() string {
+	return defaultConfig.EvidenceDir
+}
+
+// GetLogDir returns the configured log directory.
+func GetLogDir() string {
+	return defaultConfig.LogDir
+}
+
+// ReloadConfig reloads the configuration from environment variables.
+func ReloadConfig() {
+	defaultConfig = DefaultPathConfig()
+}
+
+// GetAllPaths returns all configured paths as a slice.
+func GetAllPaths() []string {
+	return []string{
+		defaultConfig.CarvedFilesDir,
+		defaultConfig.ExtractedFilesDir,
+		defaultConfig.ProfilesDir,
+		defaultConfig.EvidenceDir,
+		defaultConfig.LogDir,
+	}
+}

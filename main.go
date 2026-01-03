@@ -436,7 +436,7 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 					// Extract QUIC connection info for packet summary
 					if quicPkt.Header != nil {
 						if quicPkt.Header.IsLongHeader {
-							pkt.Info = fmt.Sprintf("QUIC %s v%d", quicPkt.Header.PacketType, quicPkt.Header.Version)
+							pkt.Info = fmt.Sprintf("QUIC Type:%d v%d", quicPkt.Header.PacketType, quicPkt.Header.Version)
 						} else {
 							pkt.Info = "QUIC 1-RTT"
 						}

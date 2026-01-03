@@ -12,14 +12,24 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cvalentine99/nfa-linux/internal/config"
 	"github.com/zeebo/blake3"
 )
 
 // AllowedBasePaths defines the directories that are allowed for file operations.
-// This should be configured at startup based on the application's needs.
-var AllowedBasePaths = []string{
-	"/tmp/nfa-linux",
-	"/var/lib/nfa-linux",
+// This is initialized with sensible defaults and should be configured at startup.
+var AllowedBasePaths = []string{}
+
+// InitAllowedBasePaths initializes allowed paths from config.
+// Call this at application startup.
+func InitAllowedBasePaths() {
+	AllowedBasePaths = []string{
+		config.GetCarvedDir(),
+		config.GetExtractedDir(),
+		config.GetEvidenceDir(),
+		config.GetLogDir(),
+		config.GetProfilesDir(),
+	}
 }
 
 // SetAllowedBasePaths configures the allowed base paths for file operations.
