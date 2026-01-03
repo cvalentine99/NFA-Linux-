@@ -11,18 +11,20 @@ import (
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 	"github.com/vishvananda/netlink"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" xdp xdp_capture.c -- -I/usr/include -I/usr/include/x86_64-linux-gnu
-
 // XDPProgram represents a loaded XDP program.
 type XDPProgram struct {
-	objs    *xdpObjects
-	link    link.Link
-	ifIndex int
-	ifName  string
+	prog      *ebpf.Program
+	xsksMap   *ebpf.Map
+	filterMap *ebpf.Map
+	pktCount  *ebpf.Map
+	link      link.Link
+	ifIndex   int
+	ifName    string
 }
 
 // FilterConfig represents the XDP filter configuration.
@@ -48,28 +50,102 @@ func LoadXDPProgram(ifaceName string) (*XDPProgram, error) {
 		return nil, fmt.Errorf("interface %s not found: %w", ifaceName, err)
 	}
 
-	// Load pre-compiled eBPF objects
-	objs := &xdpObjects{}
-	if err := loadXdpObjects(objs, nil); err != nil {
-		return nil, fmt.Errorf("failed to load eBPF objects: %w", err)
-	}
-
-	// Attach XDP program to interface
-	xdpLink, err := link.AttachXDP(link.XDPOptions{
-		Program:   objs.XdpCapture,
-		Interface: iface.Index,
-		Flags:     link.XDPGenericMode, // Use generic mode for compatibility
+	// Create XSKMAP for AF_XDP socket redirect
+	xsksMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "xsks_map",
+		Type:       ebpf.XSKMap,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 64,
 	})
 	if err != nil {
-		objs.Close()
-		return nil, fmt.Errorf("failed to attach XDP program: %w", err)
+		return nil, fmt.Errorf("failed to create xsks_map: %w", err)
+	}
+
+	// Create filter configuration map
+	filterMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "filter_map",
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  24, // FilterConfig struct size
+		MaxEntries: 1,
+	})
+	if err != nil {
+		xsksMap.Close()
+		return nil, fmt.Errorf("failed to create filter_map: %w", err)
+	}
+
+	// Create per-CPU packet counter map
+	pktCount, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "pkt_count",
+		Type:       ebpf.PerCPUArray,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+	})
+	if err != nil {
+		xsksMap.Close()
+		filterMap.Close()
+		return nil, fmt.Errorf("failed to create pkt_count: %w", err)
+	}
+
+	// Create XDP program that redirects to AF_XDP socket
+	progSpec := &ebpf.ProgramSpec{
+		Name:    "xdp_capture",
+		Type:    ebpf.XDP,
+		License: "GPL",
+		Instructions: asm.Instructions{
+			// r2 = *(u32 *)(r1 + 4)  ; load rx_queue_index from xdp_md
+			asm.LoadMem(asm.R2, asm.R1, 4, asm.Word),
+			// r1 = map_fd (xsks_map)
+			asm.LoadMapPtr(asm.R1, xsksMap.FD()),
+			// r3 = XDP_PASS (fallback action)
+			asm.LoadImm(asm.R3, 2, asm.DWord),
+			// call bpf_redirect_map(map, index, flags)
+			asm.FnRedirectMap.Call(),
+			// exit with return value
+			asm.Return(),
+		},
+	}
+
+	prog, err := ebpf.NewProgram(progSpec)
+	if err != nil {
+		xsksMap.Close()
+		filterMap.Close()
+		pktCount.Close()
+		return nil, fmt.Errorf("failed to create XDP program: %w", err)
+	}
+
+	// Try native mode first, fall back to generic
+	xdpLink, err := link.AttachXDP(link.XDPOptions{
+		Program:   prog,
+		Interface: iface.Index,
+		Flags:     link.XDPDriverMode,
+	})
+	if err != nil {
+		// Fall back to generic mode
+		xdpLink, err = link.AttachXDP(link.XDPOptions{
+			Program:   prog,
+			Interface: iface.Index,
+			Flags:     link.XDPGenericMode,
+		})
+		if err != nil {
+			prog.Close()
+			xsksMap.Close()
+			filterMap.Close()
+			pktCount.Close()
+			return nil, fmt.Errorf("failed to attach XDP program: %w", err)
+		}
 	}
 
 	return &XDPProgram{
-		objs:    objs,
-		link:    xdpLink,
-		ifIndex: iface.Index,
-		ifName:  ifaceName,
+		prog:      prog,
+		xsksMap:   xsksMap,
+		filterMap: filterMap,
+		pktCount:  pktCount,
+		link:      xdpLink,
+		ifIndex:   iface.Index,
+		ifName:    ifaceName,
 	}, nil
 }
 
@@ -83,9 +159,27 @@ func (p *XDPProgram) Close() error {
 		}
 	}
 
-	if p.objs != nil {
-		if err := p.objs.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close eBPF objects: %w", err))
+	if p.prog != nil {
+		if err := p.prog.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close XDP program: %w", err))
+		}
+	}
+
+	if p.xsksMap != nil {
+		if err := p.xsksMap.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close xsks_map: %w", err))
+		}
+	}
+
+	if p.filterMap != nil {
+		if err := p.filterMap.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close filter_map: %w", err))
+		}
+	}
+
+	if p.pktCount != nil {
+		if err := p.pktCount.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close pkt_count: %w", err))
 		}
 	}
 
@@ -97,14 +191,14 @@ func (p *XDPProgram) Close() error {
 
 // RegisterXSKSocket registers an AF_XDP socket with the XDP program.
 func (p *XDPProgram) RegisterXSKSocket(queueID int, fd int) error {
-	if p.objs == nil {
+	if p.xsksMap == nil {
 		return errors.New("XDP program not loaded")
 	}
 
 	key := uint32(queueID)
 	value := uint32(fd)
 
-	if err := p.objs.XsksMap.Put(key, value); err != nil {
+	if err := p.xsksMap.Put(key, value); err != nil {
 		return fmt.Errorf("failed to register XSK socket: %w", err)
 	}
 
@@ -113,13 +207,13 @@ func (p *XDPProgram) RegisterXSKSocket(queueID int, fd int) error {
 
 // UnregisterXSKSocket removes an AF_XDP socket from the XDP program.
 func (p *XDPProgram) UnregisterXSKSocket(queueID int) error {
-	if p.objs == nil {
+	if p.xsksMap == nil {
 		return errors.New("XDP program not loaded")
 	}
 
 	key := uint32(queueID)
 
-	if err := p.objs.XsksMap.Delete(key); err != nil {
+	if err := p.xsksMap.Delete(key); err != nil {
 		return fmt.Errorf("failed to unregister XSK socket: %w", err)
 	}
 
@@ -128,7 +222,7 @@ func (p *XDPProgram) UnregisterXSKSocket(queueID int) error {
 
 // SetFilter configures the packet filter in the XDP program.
 func (p *XDPProgram) SetFilter(cfg *FilterConfig) error {
-	if p.objs == nil {
+	if p.filterMap == nil {
 		return errors.New("XDP program not loaded")
 	}
 
@@ -160,7 +254,7 @@ func (p *XDPProgram) SetFilter(cfg *FilterConfig) error {
 	filterData.Protocol = cfg.Protocol
 
 	key := uint32(0)
-	if err := p.objs.FilterMap.Put(key, filterData); err != nil {
+	if err := p.filterMap.Put(key, filterData); err != nil {
 		return fmt.Errorf("failed to set filter: %w", err)
 	}
 
@@ -174,7 +268,7 @@ func (p *XDPProgram) ClearFilter() error {
 
 // Stats returns the current XDP program statistics.
 func (p *XDPProgram) Stats() (*XDPStats, error) {
-	if p.objs == nil {
+	if p.pktCount == nil {
 		return nil, errors.New("XDP program not loaded")
 	}
 
@@ -183,7 +277,7 @@ func (p *XDPProgram) Stats() (*XDPStats, error) {
 
 	// Read per-CPU values and sum them
 	var values []uint64
-	if err := p.objs.PktCount.Lookup(key, &values); err != nil {
+	if err := p.pktCount.Lookup(key, &values); err != nil {
 		return nil, fmt.Errorf("failed to read stats: %w", err)
 	}
 
@@ -204,6 +298,11 @@ func (p *XDPProgram) InterfaceName() string {
 	return p.ifName
 }
 
+// XsksMap returns the XSKMAP for external registration.
+func (p *XDPProgram) XsksMap() *ebpf.Map {
+	return p.xsksMap
+}
+
 // ipToUint32 converts an IPv4 address to a uint32 in network byte order.
 func ipToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
@@ -215,20 +314,22 @@ func ipToUint32(ip net.IP) uint32 {
 
 // GetXDPMode returns the XDP mode supported by the interface.
 func GetXDPMode(ifaceName string) (string, error) {
-	link, err := netlink.LinkByName(ifaceName)
+	nlLink, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return "", fmt.Errorf("interface %s not found: %w", ifaceName, err)
 	}
 
 	// Check for XDP support
-	attrs := link.Attrs()
+	attrs := nlLink.Attrs()
 	if attrs.Xdp != nil && attrs.Xdp.Attached {
-		switch attrs.Xdp.AttachMode {
-		case 1:
+		// XDP is attached, check flags
+		if attrs.Xdp.Flags&uint32(link.XDPDriverMode) != 0 {
 			return "driver", nil
-		case 2:
+		}
+		if attrs.Xdp.Flags&uint32(link.XDPGenericMode) != 0 {
 			return "generic", nil
-		case 3:
+		}
+		if attrs.Xdp.Flags&uint32(link.XDPOffloadMode) != 0 {
 			return "offload", nil
 		}
 	}

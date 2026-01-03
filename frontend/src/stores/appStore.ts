@@ -286,7 +286,7 @@ export const useAppStore = create<AppState>()(
       const { filters } = state.view
       // timeRange filtering can be added here if needed
       
-      let packets = state.packetIds.map(id => state.packets.get(id)!).filter(Boolean)
+      let packets = state.packetIds.map(id => state.packets.get(id)).filter((p): p is Packet => p !== undefined)
       
       // Apply search filter
       if (filters.search) {
@@ -321,10 +321,10 @@ export const useAppStore = create<AppState>()(
       // Apply time range
       const { timeRange } = state.view
       if (timeRange.start !== null) {
-        packets = packets.filter(p => p.timestampNano >= timeRange.start!)
+        packets = packets.filter(p => timeRange.start !== null && p.timestampNano >= timeRange.start)
       }
       if (timeRange.end !== null) {
-        packets = packets.filter(p => p.timestampNano <= timeRange.end!)
+        packets = packets.filter(p => timeRange.end !== null && p.timestampNano <= timeRange.end)
       }
       
       return packets
@@ -335,7 +335,7 @@ export const useAppStore = create<AppState>()(
       const { filters } = state.view
       // timeRange filtering can be added here if needed
       
-      let flows = state.flowIds.map(id => state.flows.get(id)!).filter(Boolean)
+      let flows = state.flowIds.map(id => state.flows.get(id)).filter((f): f is Flow => f !== undefined)
       
       // Apply search filter
       if (filters.search) {
@@ -356,10 +356,10 @@ export const useAppStore = create<AppState>()(
       
       // Apply byte range filters
       if (filters.minBytes !== null) {
-        flows = flows.filter(f => f.byteCount >= filters.minBytes!)
+        flows = flows.filter(f => filters.minBytes !== null && f.byteCount >= filters.minBytes)
       }
       if (filters.maxBytes !== null) {
-        flows = flows.filter(f => f.byteCount <= filters.maxBytes!)
+        flows = flows.filter(f => filters.maxBytes !== null && f.byteCount <= filters.maxBytes)
       }
       
       return flows
@@ -369,7 +369,7 @@ export const useAppStore = create<AppState>()(
       const state = get()
       const { filters } = state.view
       
-      let alerts = state.alertIds.map(id => state.alerts.get(id)!).filter(Boolean)
+      let alerts = state.alertIds.map(id => state.alerts.get(id)).filter((a): a is Alert => a !== undefined)
       
       // Apply severity filter
       if (filters.severities.length > 0) {

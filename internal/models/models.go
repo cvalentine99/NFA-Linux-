@@ -185,6 +185,7 @@ type CarvedFile struct {
 type CaptureStats struct {
 	PacketsReceived  uint64    `json:"packets_received"`
 	PacketsDropped   uint64    `json:"packets_dropped"`
+	PacketsFiltered  uint64    `json:"packets_filtered"`
 	BytesReceived    uint64    `json:"bytes_received"`
 	PacketsPerSecond float64   `json:"packets_per_second"`
 	BytesPerSecond   float64   `json:"bytes_per_second"`
@@ -197,6 +198,7 @@ type CaptureStats struct {
 	Interface        string    `json:"interface"`
 	PromiscuousMode  bool      `json:"promiscuous_mode"`
 	CaptureFilter    string    `json:"capture_filter,omitempty"`
+	NativeMode       bool      `json:"native_mode"`
 }
 
 // DNSRecord represents a DNS query/response pair.

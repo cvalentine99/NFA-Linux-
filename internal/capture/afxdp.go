@@ -86,6 +86,16 @@ type xdpMmapOffsets struct {
 	cr   xdpRingOffset
 }
 
+// XDP statistics from kernel
+type xdpStatistics struct {
+	rxDropped       uint64
+	rxInvalidDescs  uint64
+	txInvalidDescs  uint64
+	rxRingFull      uint64
+	rxFillRingEmpty uint64
+	txRingEmpty     uint64
+}
+
 // AFXDPEngine implements high-speed packet capture using AF_XDP.
 type AFXDPEngine struct {
 	config  *Config
@@ -111,17 +121,24 @@ type AFXDPEngine struct {
 
 	// BPF filter state
 	currentFilter string
+	filterFunc    func([]byte) bool
 	filterMu      sync.RWMutex
+	
+	// Native mode status
+	nativeMode bool
 }
 
 // afxdpStats holds atomic counters for capture statistics.
 type afxdpStats struct {
-	packetsReceived uint64
-	packetsDropped  uint64
-	bytesReceived   uint64
-	filterMatched   uint64
-	filterDropped   uint64
-	startTime       time.Time
+	packetsReceived  uint64
+	packetsDropped   uint64
+	bytesReceived    uint64
+	filterMatched    uint64
+	filterDropped    uint64
+	kernelRxDropped  uint64
+	kernelRxRingFull uint64
+	kernelFillEmpty  uint64
+	startTime        time.Time
 }
 
 // xdpWorker represents a single XDP socket worker.
@@ -136,9 +153,20 @@ type xdpWorker struct {
 	umem     []byte
 	umemAddr uintptr
 
-	// Rings
-	rxRing   *xdpRing
-	fillRing *xdpRing
+	// Rings (mmap'd)
+	rxRingMem   []byte
+	fillRingMem []byte
+	
+	// Ring pointers
+	rxProd     *uint32
+	rxCons     *uint32
+	rxDescs    []xdpDesc
+	rxMask     uint32
+	
+	fillProd   *uint32
+	fillCons   *uint32
+	fillDescs  []uint64
+	fillMask   uint32
 
 	// Frame management
 	frameSize   uint32
@@ -148,17 +176,9 @@ type xdpWorker struct {
 
 	// Batch processing
 	rxBatch []xdpDesc
-}
-
-// xdpRing represents an XDP ring buffer
-type xdpRing struct {
-	producer *uint32
-	consumer *uint32
-	ring     []xdpDesc
-	mask     uint32
-	size     uint32
-	cachedProd uint32
-	cachedCons uint32
+	
+	// Filter function
+	filterFunc func([]byte) bool
 }
 
 // XDPConfig holds XDP-specific configuration.
@@ -224,6 +244,15 @@ func NewAFXDPEngine(cfg *Config) (*AFXDPEngine, error) {
 		workers:       make([]*xdpWorker, numWorkers),
 		currentFilter: cfg.BPFFilter,
 	}
+	
+	// Compile initial filter if provided
+	if cfg.BPFFilter != "" {
+		filterFunc, err := compileBPFFilter(cfg.BPFFilter)
+		if err != nil {
+			return nil, fmt.Errorf("afxdp: invalid BPF filter: %w", err)
+		}
+		engine.filterFunc = filterFunc
+	}
 
 	return engine, nil
 }
@@ -256,24 +285,76 @@ func (e *AFXDPEngine) Start(ctx context.Context) error {
 		}
 
 		e.workers[i] = worker
+		
+		// Register socket FD in xsks_map for XDP redirect
+		if e.xdpMap != nil {
+			if err := e.xdpMap.Put(uint32(queueID), uint32(worker.fd)); err != nil {
+				e.stopWorkers()
+				return fmt.Errorf("afxdp: failed to register socket in xsks_map: %w", err)
+			}
+		}
+		
 		e.workerWg.Add(1)
 		go worker.run(e.ctx, &e.workerWg)
 	}
+	
+	// Start stats collector goroutine
+	go e.collectKernelStats(ctx)
 
 	return nil
 }
 
-// createWorker creates and initializes an XDP worker
+// collectKernelStats periodically reads kernel XDP statistics
+func (e *AFXDPEngine) collectKernelStats(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.mu.RLock()
+			for _, w := range e.workers {
+				if w != nil && w.fd > 0 {
+					stats := w.getKernelStats()
+					atomic.AddUint64(&e.stats.kernelRxDropped, stats.rxDropped)
+					atomic.AddUint64(&e.stats.kernelRxRingFull, stats.rxRingFull)
+					atomic.AddUint64(&e.stats.kernelFillEmpty, stats.rxFillRingEmpty)
+				}
+			}
+			e.mu.RUnlock()
+		}
+	}
+}
+
+// getKernelStats reads XDP_STATISTICS from the socket
+func (w *xdpWorker) getKernelStats() xdpStatistics {
+	var stats xdpStatistics
+	statsLen := uint32(unsafe.Sizeof(stats))
+	
+	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT,
+		uintptr(w.fd), SOL_XDP, XDP_STATISTICS,
+		uintptr(unsafe.Pointer(&stats)),
+		uintptr(unsafe.Pointer(&statsLen)), 0)
+	if errno != 0 {
+		return xdpStatistics{}
+	}
+	return stats
+}
+
+// createWorker creates and initializes an XDP worker with proper ring setup
 func (e *AFXDPEngine) createWorker(id, queueID int) (*xdpWorker, error) {
 	xdpCfg := DefaultXDPConfig()
 
 	worker := &xdpWorker{
-		id:        id,
-		queueID:   queueID,
-		engine:    e,
-		frameSize: xdpCfg.FrameSize,
-		numFrames: xdpCfg.NumFrames,
-		rxBatch:   make([]xdpDesc, 64),
+		id:         id,
+		queueID:    queueID,
+		engine:     e,
+		frameSize:  xdpCfg.FrameSize,
+		numFrames:  xdpCfg.NumFrames,
+		rxBatch:    make([]xdpDesc, 64),
+		filterFunc: e.filterFunc,
 	}
 
 	// Create AF_XDP socket
@@ -351,36 +432,111 @@ func (e *AFXDPEngine) createWorker(id, queueID int) (*xdpWorker, error) {
 		return nil, fmt.Errorf("failed to get mmap offsets: %w", errno)
 	}
 
+	// Mmap the RX ring
+	rxRingMemSize := offsets.rx.desc + uint64(rxRingSize)*uint64(unsafe.Sizeof(xdpDesc{}))
+	rxRingMem, err := unix.Mmap(fd, XDP_PGOFF_RX_RING, int(rxRingMemSize),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_POPULATE)
+	if err != nil {
+		unix.Munmap(umem)
+		unix.Close(fd)
+		return nil, fmt.Errorf("failed to mmap RX ring: %w", err)
+	}
+	worker.rxRingMem = rxRingMem
+	
+	// Set up RX ring pointers
+	worker.rxProd = (*uint32)(unsafe.Pointer(&rxRingMem[offsets.rx.producer]))
+	worker.rxCons = (*uint32)(unsafe.Pointer(&rxRingMem[offsets.rx.consumer]))
+	worker.rxMask = rxRingSize - 1
+	
+	// Create slice over the descriptors
+	rxDescPtr := unsafe.Pointer(&rxRingMem[offsets.rx.desc])
+	worker.rxDescs = unsafe.Slice((*xdpDesc)(rxDescPtr), rxRingSize)
+
+	// Mmap the fill ring
+	fillRingMemSize := offsets.fr.desc + uint64(fillRingSize)*8 // uint64 addresses
+	fillRingMem, err := unix.Mmap(fd, int64(XDP_UMEM_PGOFF_FILL_RING), int(fillRingMemSize),
+		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_POPULATE)
+	if err != nil {
+		unix.Munmap(rxRingMem)
+		unix.Munmap(umem)
+		unix.Close(fd)
+		return nil, fmt.Errorf("failed to mmap fill ring: %w", err)
+	}
+	worker.fillRingMem = fillRingMem
+	
+	// Set up fill ring pointers
+	worker.fillProd = (*uint32)(unsafe.Pointer(&fillRingMem[offsets.fr.producer]))
+	worker.fillCons = (*uint32)(unsafe.Pointer(&fillRingMem[offsets.fr.consumer]))
+	worker.fillMask = fillRingSize - 1
+	
+	// Create slice over the fill ring addresses
+	fillDescPtr := unsafe.Pointer(&fillRingMem[offsets.fr.desc])
+	worker.fillDescs = unsafe.Slice((*uint64)(fillDescPtr), fillRingSize)
+
 	// Initialize free frames list
-	worker.freeFrames = make([]uint64, xdpCfg.NumFrames)
+	worker.freeFrames = make([]uint64, 0, xdpCfg.NumFrames)
 	for i := uint32(0); i < xdpCfg.NumFrames; i++ {
-		worker.freeFrames[i] = uint64(i) * uint64(xdpCfg.FrameSize)
+		worker.freeFrames = append(worker.freeFrames, uint64(i)*uint64(xdpCfg.FrameSize))
 	}
 
-	// Bind socket to interface and queue
+	// Bind socket to interface and queue - try native mode first
 	sa := &unix.SockaddrXDP{
 		Flags:   XDP_USE_NEED_WAKEUP,
 		Ifindex: uint32(e.ifIndex),
 		QueueID: uint32(queueID),
 	}
 
+	// Try zero-copy native mode first
 	if xdpCfg.ZeroCopy {
 		sa.Flags |= XDP_ZEROCOPY
-	} else {
-		sa.Flags |= XDP_COPY
 	}
 
-	if err := unix.Bind(fd, sa); err != nil {
-		// Try without zero-copy if it fails
+	bindErr := unix.Bind(fd, sa)
+	if bindErr != nil {
+		// Try copy mode
 		sa.Flags = XDP_COPY | XDP_USE_NEED_WAKEUP
-		if err := unix.Bind(fd, sa); err != nil {
+		bindErr = unix.Bind(fd, sa)
+		if bindErr != nil {
+			unix.Munmap(fillRingMem)
+			unix.Munmap(rxRingMem)
 			unix.Munmap(umem)
 			unix.Close(fd)
-			return nil, fmt.Errorf("failed to bind socket: %w", err)
+			return nil, fmt.Errorf("failed to bind socket: %w", bindErr)
 		}
+	}
+	
+	// Initial fill ring population - give kernel all frames
+	if err := worker.initialFillRing(); err != nil {
+		unix.Munmap(fillRingMem)
+		unix.Munmap(rxRingMem)
+		unix.Munmap(umem)
+		unix.Close(fd)
+		return nil, fmt.Errorf("failed to populate fill ring: %w", err)
 	}
 
 	return worker, nil
+}
+
+// initialFillRing populates the fill ring with all available frames
+func (w *xdpWorker) initialFillRing() error {
+	w.framesMu.Lock()
+	defer w.framesMu.Unlock()
+	
+	prod := atomic.LoadUint32(w.fillProd)
+	
+	// Add all free frames to fill ring
+	for i, addr := range w.freeFrames {
+		idx := (prod + uint32(i)) & w.fillMask
+		w.fillDescs[idx] = addr
+	}
+	
+	// Update producer
+	atomic.StoreUint32(w.fillProd, prod+uint32(len(w.freeFrames)))
+	
+	// Clear free frames - they're now owned by kernel
+	w.freeFrames = w.freeFrames[:0]
+	
+	return nil
 }
 
 // stopWorkers stops all workers
@@ -394,6 +550,14 @@ func (e *AFXDPEngine) stopWorkers() {
 
 // cleanup releases worker resources
 func (w *xdpWorker) cleanup() {
+	if w.fillRingMem != nil {
+		unix.Munmap(w.fillRingMem)
+		w.fillRingMem = nil
+	}
+	if w.rxRingMem != nil {
+		unix.Munmap(w.rxRingMem)
+		w.rxRingMem = nil
+	}
 	if w.umem != nil {
 		unix.Munmap(w.umem)
 		w.umem = nil
@@ -443,11 +607,16 @@ func (e *AFXDPEngine) Stop() error {
 	return nil
 }
 
-// Stats returns current capture statistics.
+// Stats returns current capture statistics including kernel stats.
 func (e *AFXDPEngine) Stats() *models.CaptureStats {
 	received := atomic.LoadUint64(&e.stats.packetsReceived)
 	dropped := atomic.LoadUint64(&e.stats.packetsDropped)
 	bytes := atomic.LoadUint64(&e.stats.bytesReceived)
+	kernelDropped := atomic.LoadUint64(&e.stats.kernelRxDropped)
+	filterDropped := atomic.LoadUint64(&e.stats.filterDropped)
+
+	// Total drops = userspace drops + kernel drops + filtered
+	totalDropped := dropped + kernelDropped
 
 	elapsed := time.Since(e.stats.startTime).Seconds()
 	var pps, bps float64
@@ -458,7 +627,8 @@ func (e *AFXDPEngine) Stats() *models.CaptureStats {
 
 	return &models.CaptureStats{
 		PacketsReceived:  received,
-		PacketsDropped:   dropped,
+		PacketsDropped:   totalDropped,
+		PacketsFiltered:  filterDropped,
 		BytesReceived:    bytes,
 		PacketsPerSecond: pps,
 		BytesPerSecond:   bps,
@@ -467,6 +637,7 @@ func (e *AFXDPEngine) Stats() *models.CaptureStats {
 		Interface:        e.config.Interface,
 		PromiscuousMode:  e.config.Promiscuous,
 		CaptureFilter:    e.config.BPFFilter,
+		NativeMode:       e.nativeMode,
 	}
 }
 
@@ -478,35 +649,35 @@ func (e *AFXDPEngine) SetHandler(handler PacketHandler) {
 }
 
 // SetBPFFilter sets a BPF filter at runtime.
-// For AF_XDP, this reloads the XDP program with the new filter compiled into it.
 func (e *AFXDPEngine) SetBPFFilter(filter string) error {
 	e.filterMu.Lock()
 	defer e.filterMu.Unlock()
 
-	// Store the filter for software fallback
+	// Store the filter
 	e.currentFilter = filter
 	e.config.BPFFilter = filter
 
-	// If no filter, detach any existing filter program
+	// If no filter, clear filter function
 	if filter == "" {
-		if e.filterProg != nil {
-			e.filterProg.Close()
-			e.filterProg = nil
+		e.filterFunc = nil
+		e.mu.Lock()
+		for _, w := range e.workers {
+			if w != nil {
+				w.setFilter(nil)
+			}
 		}
+		e.mu.Unlock()
 		return nil
 	}
 
-	// Compile the BPF filter to cBPF instructions
-	// Note: XDP uses eBPF, but we can convert cBPF to eBPF or use software filtering
-	// For complex filters, we fall back to software filtering in the worker
-	
-	// Parse the filter expression and create a software filter function
+	// Compile the BPF filter
 	filterFunc, err := compileBPFFilter(filter)
 	if err != nil {
 		return fmt.Errorf("afxdp: failed to compile BPF filter: %w", err)
 	}
 
-	// Store the compiled filter for use in workers
+	// Store and distribute to workers
+	e.filterFunc = filterFunc
 	e.mu.Lock()
 	for _, w := range e.workers {
 		if w != nil {
@@ -520,19 +691,15 @@ func (e *AFXDPEngine) SetBPFFilter(filter string) error {
 
 // compileBPFFilter compiles a BPF filter expression into a filter function
 func compileBPFFilter(filter string) (func([]byte) bool, error) {
-	// Parse common filter expressions
-	// This is a simplified implementation - production would use libpcap or a full BPF compiler
-	
 	switch {
 	case filter == "":
-		return func([]byte) bool { return true }, nil
+		return nil, nil
 	
 	case filter == "tcp":
 		return func(data []byte) bool {
 			if len(data) < 24 {
 				return false
 			}
-			// Check EtherType is IPv4 and protocol is TCP
 			etherType := binary.BigEndian.Uint16(data[12:14])
 			if etherType != 0x0800 {
 				return false
@@ -565,7 +732,6 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 		}, nil
 	
 	case strings.HasPrefix(filter, "port "):
-		// Parse port filter: "port 80" or "port 443"
 		portStr := strings.TrimPrefix(filter, "port ")
 		port, err := strconv.ParseUint(portStr, 10, 16)
 		if err != nil {
@@ -573,7 +739,7 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 		}
 		portBytes := uint16(port)
 		return func(data []byte) bool {
-			if len(data) < 36 { // Ethernet + IP + TCP/UDP headers
+			if len(data) < 36 {
 				return false
 			}
 			etherType := binary.BigEndian.Uint16(data[12:14])
@@ -590,7 +756,6 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 		}, nil
 
 	case strings.HasPrefix(filter, "host "):
-		// Parse host filter: "host 192.168.1.1"
 		hostStr := strings.TrimPrefix(filter, "host ")
 		hostIP := net.ParseIP(hostStr)
 		if hostIP == nil {
@@ -608,12 +773,10 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 			if etherType != 0x0800 {
 				return false
 			}
-			// Compare source and destination IPs
 			return bytes.Equal(data[26:30], hostIP4) || bytes.Equal(data[30:34], hostIP4)
 		}, nil
 
 	default:
-		// Return error for unsupported complex filters instead of silent accept-all
 		return nil, fmt.Errorf("unsupported BPF filter '%s': only 'tcp', 'udp', 'icmp', 'port N', 'host IP' are supported", filter)
 	}
 }
@@ -622,29 +785,12 @@ func compileBPFFilter(filter string) (func([]byte) bool, error) {
 func (w *xdpWorker) setFilter(filterFunc func([]byte) bool) {
 	w.framesMu.Lock()
 	defer w.framesMu.Unlock()
-	// Store filter function - would be used in packet processing
-	_ = filterFunc
+	w.filterFunc = filterFunc
 }
 
 // loadXDPProgram loads and attaches the XDP program.
 func (e *AFXDPEngine) loadXDPProgram() error {
-	// Create a minimal XDP program that redirects packets to AF_XDP socket
-	// This is the eBPF bytecode for a simple XDP_PASS program
-	// In production, this would be generated from C code using bpf2go
-	
-	progSpec := &ebpf.ProgramSpec{
-		Name:    "xdp_sock",
-		Type:    ebpf.XDP,
-		License: "GPL",
-		// Minimal XDP program: return XDP_PASS (2)
-		Instructions: asm.Instructions{
-			asm.LoadImm(asm.R0, 2, asm.DWord), // mov r0, 2 (XDP_PASS)
-			asm.Return(),                       // exit
-		},
-	}
-
-	// For AF_XDP, we need an XDP program that redirects to the socket
-	// Using XDP_REDIRECT with XSKMAP
+	// Create XSKMAP for socket redirect
 	mapSpec := &ebpf.MapSpec{
 		Name:       "xsks_map",
 		Type:       ebpf.XSKMap,
@@ -655,25 +801,8 @@ func (e *AFXDPEngine) loadXDPProgram() error {
 
 	xskMap, err := ebpf.NewMap(mapSpec)
 	if err != nil {
-		// Fall back to simple XDP_PASS if XSKMAP not supported
-		prog, err := ebpf.NewProgram(progSpec)
-		if err != nil {
-			return fmt.Errorf("failed to create XDP program: %w", err)
-		}
-		e.xdpProg = prog
-
-		// Attach XDP program to interface
-		xdpLink, err := link.AttachXDP(link.XDPOptions{
-			Program:   prog,
-			Interface: e.ifIndex,
-			Flags:     link.XDPGenericMode, // Use generic mode for compatibility
-		})
-		if err != nil {
-			prog.Close()
-			return fmt.Errorf("failed to attach XDP program: %w", err)
-		}
-		e.xdpLink = xdpLink
-		return nil
+		// XSKMAP not supported, fall back to simple XDP_PASS
+		return e.loadFallbackProgram()
 	}
 	e.xdpMap = xskMap
 
@@ -682,17 +811,16 @@ func (e *AFXDPEngine) loadXDPProgram() error {
 		Name:    "xdp_sock_prog",
 		Type:    ebpf.XDP,
 		License: "GPL",
-		// XDP program that redirects to AF_XDP socket
 		Instructions: asm.Instructions{
 			// r2 = *(u32 *)(r1 + 4)  ; load rx_queue_index from xdp_md
 			asm.LoadMem(asm.R2, asm.R1, 4, asm.Word),
-			// r1 = map_fd (will be rewritten by loader)
+			// r1 = map_fd
 			asm.LoadMapPtr(asm.R1, xskMap.FD()),
 			// r3 = XDP_PASS (fallback action)
 			asm.LoadImm(asm.R3, 2, asm.DWord),
 			// call bpf_redirect_map(map, index, flags)
 			asm.FnRedirectMap.Call(),
-			// exit with return value from redirect_map
+			// exit with return value
 			asm.Return(),
 		},
 	}
@@ -700,31 +828,77 @@ func (e *AFXDPEngine) loadXDPProgram() error {
 	prog, err := ebpf.NewProgram(redirectSpec)
 	if err != nil {
 		xskMap.Close()
-		// Fall back to simple program
-		simpleProg, err := ebpf.NewProgram(progSpec)
-		if err != nil {
-			return fmt.Errorf("failed to create XDP program: %w", err)
-		}
-		e.xdpProg = simpleProg
-	} else {
-		e.xdpProg = prog
+		return e.loadFallbackProgram()
 	}
+	e.xdpProg = prog
 
-	// Attach XDP program to interface
+	// Try native mode first, fall back to generic
 	xdpLink, err := link.AttachXDP(link.XDPOptions{
 		Program:   e.xdpProg,
 		Interface: e.ifIndex,
-		Flags:     link.XDPGenericMode,
+		Flags:     link.XDPDriverMode, // Try native/driver mode first
 	})
 	if err != nil {
-		e.xdpProg.Close()
-		if e.xdpMap != nil {
+		// Fall back to generic mode
+		xdpLink, err = link.AttachXDP(link.XDPOptions{
+			Program:   e.xdpProg,
+			Interface: e.ifIndex,
+			Flags:     link.XDPGenericMode,
+		})
+		if err != nil {
+			e.xdpProg.Close()
 			e.xdpMap.Close()
+			return fmt.Errorf("failed to attach XDP program: %w", err)
 		}
-		return fmt.Errorf("failed to attach XDP program: %w", err)
+		e.nativeMode = false
+	} else {
+		e.nativeMode = true
 	}
 	e.xdpLink = xdpLink
 
+	return nil
+}
+
+// loadFallbackProgram loads a simple XDP_PASS program when XSKMAP isn't available
+func (e *AFXDPEngine) loadFallbackProgram() error {
+	progSpec := &ebpf.ProgramSpec{
+		Name:    "xdp_pass",
+		Type:    ebpf.XDP,
+		License: "GPL",
+		Instructions: asm.Instructions{
+			asm.LoadImm(asm.R0, 2, asm.DWord), // XDP_PASS
+			asm.Return(),
+		},
+	}
+
+	prog, err := ebpf.NewProgram(progSpec)
+	if err != nil {
+		return fmt.Errorf("failed to create fallback XDP program: %w", err)
+	}
+	e.xdpProg = prog
+
+	// Try native mode first
+	xdpLink, err := link.AttachXDP(link.XDPOptions{
+		Program:   prog,
+		Interface: e.ifIndex,
+		Flags:     link.XDPDriverMode,
+	})
+	if err != nil {
+		// Fall back to generic mode
+		xdpLink, err = link.AttachXDP(link.XDPOptions{
+			Program:   prog,
+			Interface: e.ifIndex,
+			Flags:     link.XDPGenericMode,
+		})
+		if err != nil {
+			prog.Close()
+			return fmt.Errorf("failed to attach XDP program: %w", err)
+		}
+		e.nativeMode = false
+	} else {
+		e.nativeMode = true
+	}
+	e.xdpLink = xdpLink
 	return nil
 }
 
@@ -760,7 +934,6 @@ func (w *xdpWorker) run(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		default:
-			// Poll for packets using epoll
 			n, err := unix.EpollWait(epfd, events, pollTimeout)
 			if err != nil {
 				if err == syscall.EINTR {
@@ -770,18 +943,17 @@ func (w *xdpWorker) run(ctx context.Context, wg *sync.WaitGroup) {
 			}
 
 			if n > 0 {
-				// Process received packets
-				w.processRxPackets()
+				w.processRxRing()
 			}
 
-			// Refill the fill ring
+			// Refill the fill ring with processed frames
 			w.refillFillRing()
 		}
 	}
 }
 
-// processRxPackets processes packets from the RX ring
-func (w *xdpWorker) processRxPackets() {
+// processRxRing processes packets from the RX ring using proper ring access
+func (w *xdpWorker) processRxRing() {
 	w.engine.mu.RLock()
 	handler := w.engine.handler
 	w.engine.mu.RUnlock()
@@ -790,30 +962,73 @@ func (w *xdpWorker) processRxPackets() {
 		return
 	}
 
-	// Read packets from socket using recvfrom
-	buf := make([]byte, w.frameSize)
-	for {
-		n, _, err := unix.Recvfrom(w.fd, buf, unix.MSG_DONTWAIT)
-		if err != nil {
-			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-				break
-			}
-			return
+	// Read producer index (written by kernel)
+	prod := atomic.LoadUint32(w.rxProd)
+	cons := atomic.LoadUint32(w.rxCons)
+	
+	// Process all available entries
+	for cons != prod {
+		idx := cons & w.rxMask
+		desc := w.rxDescs[idx]
+		
+		// Get packet data from UMEM
+		addr := desc.addr
+		length := desc.len
+		
+		if addr < uint64(len(w.umem)) && addr+uint64(length) <= uint64(len(w.umem)) {
+			data := w.umem[addr : addr+uint64(length)]
+			w.processPacket(data, time.Now().UnixNano())
+			
+			// Return frame to free list
+			w.framesMu.Lock()
+			w.freeFrames = append(w.freeFrames, addr)
+			w.framesMu.Unlock()
 		}
-
-		if n > 0 {
-			w.processPacket(buf[:n], time.Now().UnixNano())
-		}
+		
+		cons++
 	}
+	
+	// Update consumer index
+	atomic.StoreUint32(w.rxCons, cons)
 }
 
 // refillFillRing refills the fill ring with free frames
 func (w *xdpWorker) refillFillRing() {
-	// This would refill the UMEM fill ring with free frame addresses
-	// For the socket-based approach, this is handled by the kernel
+	w.framesMu.Lock()
+	defer w.framesMu.Unlock()
+	
+	if len(w.freeFrames) == 0 {
+		return
+	}
+	
+	prod := atomic.LoadUint32(w.fillProd)
+	cons := atomic.LoadUint32(w.fillCons)
+	
+	// Calculate available space
+	free := w.fillMask + 1 - (prod - cons)
+	if free == 0 {
+		return
+	}
+	
+	// Add frames to fill ring
+	toAdd := uint32(len(w.freeFrames))
+	if toAdd > free {
+		toAdd = free
+	}
+	
+	for i := uint32(0); i < toAdd; i++ {
+		idx := (prod + i) & w.fillMask
+		w.fillDescs[idx] = w.freeFrames[i]
+	}
+	
+	// Update producer
+	atomic.StoreUint32(w.fillProd, prod+toAdd)
+	
+	// Remove used frames from free list
+	w.freeFrames = w.freeFrames[toAdd:]
 }
 
-// processPacket processes a single packet and calls the handler.
+// processPacket processes a single packet with filter enforcement
 func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 	w.engine.mu.RLock()
 	handler := w.engine.handler
@@ -821,6 +1036,15 @@ func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 
 	if handler == nil {
 		return
+	}
+
+	// Apply BPF filter if set
+	if w.filterFunc != nil {
+		if !w.filterFunc(data) {
+			atomic.AddUint64(&w.engine.stats.filterDropped, 1)
+			return
+		}
+		atomic.AddUint64(&w.engine.stats.filterMatched, 1)
 	}
 
 	// Update stats
@@ -835,14 +1059,12 @@ func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 		Interface:     w.engine.config.Interface,
 	}
 
-	// Parse basic headers for the info struct
+	// Parse basic headers
 	if len(data) >= 14 {
-		// Ethernet header
 		info.DstMAC = net.HardwareAddr(data[0:6]).String()
 		info.SrcMAC = net.HardwareAddr(data[6:12]).String()
 		info.EtherType = uint16(data[12])<<8 | uint16(data[13])
 
-		// IPv4 header (if present)
 		if info.EtherType == 0x0800 && len(data) >= 34 {
 			ipHeader := data[14:]
 			info.Protocol = ipHeader[9]
@@ -852,26 +1074,25 @@ func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 			ihl := int(ipHeader[0]&0x0F) * 4
 			if len(data) >= 14+ihl+4 {
 				transportHeader := data[14+ihl:]
-				if info.Protocol == 6 || info.Protocol == 17 { // TCP or UDP
+				if info.Protocol == 6 || info.Protocol == 17 {
 					info.SrcPort = uint16(transportHeader[0])<<8 | uint16(transportHeader[1])
 					info.DstPort = uint16(transportHeader[2])<<8 | uint16(transportHeader[3])
 				}
-				if info.Protocol == 6 && len(transportHeader) >= 14 { // TCP flags
+				if info.Protocol == 6 && len(transportHeader) >= 14 {
 					info.TCPFlags = transportHeader[13]
 				}
 			}
 		}
 
-		// IPv6 header (if present)
 		if info.EtherType == 0x86DD && len(data) >= 54 {
 			ipHeader := data[14:]
-			info.Protocol = ipHeader[6] // Next header
+			info.Protocol = ipHeader[6]
 			info.SrcIP = net.IP(ipHeader[8:24])
 			info.DstIP = net.IP(ipHeader[24:40])
 
 			if len(data) >= 58 {
 				transportHeader := data[54:]
-				if info.Protocol == 6 || info.Protocol == 17 { // TCP or UDP
+				if info.Protocol == 6 || info.Protocol == 17 {
 					info.SrcPort = uint16(transportHeader[0])<<8 | uint16(transportHeader[1])
 					info.DstPort = uint16(transportHeader[2])<<8 | uint16(transportHeader[3])
 				}
@@ -880,11 +1101,6 @@ func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 	}
 
 	handler(data, info)
-}
-
-// getTimestampNano returns the current timestamp in nanoseconds.
-func getTimestampNano() int64 {
-	return time.Now().UnixNano()
 }
 
 // Ensure AFXDPEngine implements Engine interface
