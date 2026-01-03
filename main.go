@@ -46,7 +46,7 @@ func main() {
 		Linux: &linux.Options{
 			Icon:                []byte{}, // Add icon bytes here
 			WindowIsTranslucent: false,
-			WebviewGpuPolicy:    linux.WebviewGpuPolicyAlways,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyNever, // Software rendering for NVIDIA Grace compatibility
 			ProgramName:         "nfa-linux",
 		},
 
