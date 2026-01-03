@@ -398,3 +398,244 @@ func (r *ModelRegistry) Close() error {
 	r.models = make(map[string]*ONNXEngine)
 	return lastErr
 }
+
+// =============================================================================
+// Enhanced Error Handling and Retry Logic
+// =============================================================================
+
+// InferenceError represents a detailed inference error.
+type InferenceError struct {
+	Op        string        // Operation that failed
+	ModelName string        // Model name if applicable
+	InputIdx  int           // Input index for batch operations (-1 if N/A)
+	Cause     error         // Underlying error
+	Retryable bool          // Whether the error is retryable
+	Timestamp time.Time     // When the error occurred
+}
+
+func (e *InferenceError) Error() string {
+	if e.InputIdx >= 0 {
+		return fmt.Sprintf("%s failed for input[%d] on model %s: %v", e.Op, e.InputIdx, e.ModelName, e.Cause)
+	}
+	return fmt.Sprintf("%s failed on model %s: %v", e.Op, e.ModelName, e.Cause)
+}
+
+func (e *InferenceError) Unwrap() error {
+	return e.Cause
+}
+
+// IsRetryable checks if an error is retryable.
+func IsRetryable(err error) bool {
+	var infErr *InferenceError
+	if errors.As(err, &infErr) {
+		return infErr.Retryable
+	}
+	return false
+}
+
+// RetryConfig holds retry configuration.
+type RetryConfig struct {
+	MaxRetries     int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	BackoffFactor  float64
+}
+
+// DefaultRetryConfig returns sensible defaults.
+func DefaultRetryConfig() *RetryConfig {
+	return &RetryConfig{
+		MaxRetries:     3,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     1 * time.Second,
+		BackoffFactor:  2.0,
+	}
+}
+
+// PredictWithRetry performs inference with automatic retry on transient failures.
+func (e *ONNXEngine) PredictWithRetry(ctx context.Context, input []float32, cfg *RetryConfig) ([]float32, error) {
+	if cfg == nil {
+		cfg = DefaultRetryConfig()
+	}
+	
+	var lastErr error
+	backoff := cfg.InitialBackoff
+	
+	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
+		result, err := e.Predict(ctx, input)
+		if err == nil {
+			return result, nil
+		}
+		
+		lastErr = err
+		
+		// Check if error is retryable
+		if !IsRetryable(err) {
+			return nil, err
+		}
+		
+		// Don't retry on last attempt
+		if attempt == cfg.MaxRetries {
+			break
+		}
+		
+		// Wait with exponential backoff
+		select {
+		case <-time.After(backoff):
+			backoff = time.Duration(float64(backoff) * cfg.BackoffFactor)
+			if backoff > cfg.MaxBackoff {
+				backoff = cfg.MaxBackoff
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	
+	return nil, fmt.Errorf("inference failed after %d retries: %w", cfg.MaxRetries, lastErr)
+}
+
+// =============================================================================
+// Health Checks and Diagnostics
+// =============================================================================
+
+// HealthStatus represents the health of an ONNX engine.
+type HealthStatus struct {
+	Healthy           bool
+	Initialized       bool
+	SessionPoolSize   int
+	AvailableSessions int
+	LastInferenceTime time.Time
+	TotalInferences   int64
+	FailedInferences  int64
+	AverageLatencyMs  float64
+	LastError         string
+	LastErrorTime     time.Time
+}
+
+// Health returns the current health status of the engine.
+func (e *ONNXEngine) Health() *HealthStatus {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	
+	status := &HealthStatus{
+		Healthy:         e.initialized,
+		Initialized:     e.initialized,
+		SessionPoolSize: e.poolSize,
+	}
+	
+	if e.initialized && e.sessionPool != nil {
+		status.AvailableSessions = len(e.sessionPool)
+	}
+	
+	return status
+}
+
+// Warmup performs warmup inference to ensure model is loaded and ready.
+func (e *ONNXEngine) Warmup(ctx context.Context, numIterations int) error {
+	e.mu.RLock()
+	if !e.initialized {
+		e.mu.RUnlock()
+		return fmt.Errorf("engine not initialized")
+	}
+	e.mu.RUnlock()
+	
+	if numIterations <= 0 {
+		numIterations = 3
+	}
+	
+	// Create dummy input based on first input shape
+	if len(e.config.InputShapes) == 0 {
+		return fmt.Errorf("no input shapes configured")
+	}
+	
+	inputSize := int64(1)
+	for _, dim := range e.config.InputShapes[0] {
+		inputSize *= dim
+	}
+	
+	dummyInput := make([]float32, inputSize)
+	
+	for i := 0; i < numIterations; i++ {
+		_, err := e.Predict(ctx, dummyInput)
+		if err != nil {
+			return fmt.Errorf("warmup iteration %d failed: %w", i, err)
+		}
+	}
+	
+	return nil
+}
+
+// Benchmark measures inference performance.
+func (e *ONNXEngine) Benchmark(ctx context.Context, input []float32, iterations int) (*BenchmarkResult, error) {
+	if iterations <= 0 {
+		iterations = 100
+	}
+	
+	latencies := make([]time.Duration, 0, iterations)
+	
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		_, err := e.Predict(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("benchmark iteration %d failed: %w", i, err)
+		}
+		latencies = append(latencies, time.Since(start))
+	}
+	
+	// Calculate statistics
+	var total time.Duration
+	min := latencies[0]
+	max := latencies[0]
+	
+	for _, lat := range latencies {
+		total += lat
+		if lat < min {
+			min = lat
+		}
+		if lat > max {
+			max = lat
+		}
+	}
+	
+	avg := total / time.Duration(iterations)
+	
+	// Calculate p50, p95, p99
+	sortDurations(latencies)
+	p50 := latencies[iterations/2]
+	p95 := latencies[int(float64(iterations)*0.95)]
+	p99 := latencies[int(float64(iterations)*0.99)]
+	
+	return &BenchmarkResult{
+		Iterations:    iterations,
+		TotalTime:     total,
+		AverageTime:   avg,
+		MinTime:       min,
+		MaxTime:       max,
+		P50:           p50,
+		P95:           p95,
+		P99:           p99,
+		Throughput:    float64(iterations) / total.Seconds(),
+	}, nil
+}
+
+// BenchmarkResult holds benchmark statistics.
+type BenchmarkResult struct {
+	Iterations  int
+	TotalTime   time.Duration
+	AverageTime time.Duration
+	MinTime     time.Duration
+	MaxTime     time.Duration
+	P50         time.Duration
+	P95         time.Duration
+	P99         time.Duration
+	Throughput  float64 // inferences per second
+}
+
+func sortDurations(d []time.Duration) {
+	for i := 0; i < len(d)-1; i++ {
+		for j := i + 1; j < len(d); j++ {
+			if d[i] > d[j] {
+				d[i], d[j] = d[j], d[i]
+			}
+		}
+	}
+}

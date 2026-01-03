@@ -4,6 +4,8 @@ package ml
 import (
 	"math"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
@@ -707,4 +709,388 @@ func Percentile(data []float32, p float64) float32 {
 	
 	weight := float32(index - float64(lower))
 	return sorted[lower]*(1-weight) + sorted[upper]*weight
+}
+
+
+// =============================================================================
+// Sliding Window Feature Extractor
+// =============================================================================
+
+// SlidingWindowExtractor extracts features over sliding time windows.
+type SlidingWindowExtractor struct {
+	windowSize time.Duration
+	stepSize   time.Duration
+	packets    []windowPacket
+	mu         sync.Mutex
+}
+
+type windowPacket struct {
+	Timestamp time.Time
+	Size      int
+	Direction int
+	TCPFlags  uint8
+	Payload   []byte
+}
+
+// NewSlidingWindowExtractor creates a new sliding window extractor.
+func NewSlidingWindowExtractor(windowSize, stepSize time.Duration) *SlidingWindowExtractor {
+	return &SlidingWindowExtractor{
+		windowSize: windowSize,
+		stepSize:   stepSize,
+		packets:    make([]windowPacket, 0, 10000),
+	}
+}
+
+// AddPacket adds a packet to the extractor.
+func (swe *SlidingWindowExtractor) AddPacket(ts time.Time, size int, direction int, tcpFlags uint8, payload []byte) {
+	swe.mu.Lock()
+	defer swe.mu.Unlock()
+	swe.packets = append(swe.packets, windowPacket{
+		Timestamp: ts,
+		Size:      size,
+		Direction: direction,
+		TCPFlags:  tcpFlags,
+		Payload:   payload,
+	})
+}
+
+// ExtractWindows extracts features for all windows.
+func (swe *SlidingWindowExtractor) ExtractWindows() []*FlowFeatures {
+	swe.mu.Lock()
+	defer swe.mu.Unlock()
+
+	if len(swe.packets) == 0 {
+		return nil
+	}
+
+	// Sort packets by timestamp
+	sort.Slice(swe.packets, func(i, j int) bool {
+		return swe.packets[i].Timestamp.Before(swe.packets[j].Timestamp)
+	})
+
+	startTime := swe.packets[0].Timestamp
+	endTime := swe.packets[len(swe.packets)-1].Timestamp
+
+	var results []*FlowFeatures
+
+	for windowStart := startTime; windowStart.Before(endTime); windowStart = windowStart.Add(swe.stepSize) {
+		windowEnd := windowStart.Add(swe.windowSize)
+
+		// Collect packets in this window
+		var windowPackets []windowPacket
+		for _, pkt := range swe.packets {
+			if !pkt.Timestamp.Before(windowStart) && pkt.Timestamp.Before(windowEnd) {
+				windowPackets = append(windowPackets, pkt)
+			}
+		}
+
+		if len(windowPackets) > 0 {
+			features := swe.extractWindowFeatures(windowPackets)
+			results = append(results, features)
+		}
+	}
+
+	return results
+}
+
+func (swe *SlidingWindowExtractor) extractWindowFeatures(packets []windowPacket) *FlowFeatures {
+	features := &FlowFeatures{}
+
+	if len(packets) == 0 {
+		return features
+	}
+
+	// Duration
+	duration := packets[len(packets)-1].Timestamp.Sub(packets[0].Timestamp).Seconds()
+	features.Duration = float32(duration)
+	features.TotalPackets = float32(len(packets))
+
+	// Collect sizes and calculate stats
+	var totalBytes int64
+	var fwdPackets, bwdPackets int64
+	var fwdBytes, bwdBytes int64
+	sizes := make([]float64, len(packets))
+	iats := make([]float64, 0, len(packets)-1)
+
+	for i, pkt := range packets {
+		sizes[i] = float64(pkt.Size)
+		totalBytes += int64(pkt.Size)
+
+		if pkt.Direction == 0 {
+			fwdPackets++
+			fwdBytes += int64(pkt.Size)
+		} else {
+			bwdPackets++
+			bwdBytes += int64(pkt.Size)
+		}
+
+		// TCP flags
+		if pkt.TCPFlags&0x01 != 0 { features.FINCount++ }
+		if pkt.TCPFlags&0x02 != 0 { features.SYNCount++ }
+		if pkt.TCPFlags&0x04 != 0 { features.RSTCount++ }
+		if pkt.TCPFlags&0x08 != 0 { features.PSHCount++ }
+		if pkt.TCPFlags&0x10 != 0 { features.ACKCount++ }
+		if pkt.TCPFlags&0x20 != 0 { features.URGCount++ }
+
+		// IAT
+		if i > 0 {
+			iat := pkt.Timestamp.Sub(packets[i-1].Timestamp).Seconds()
+			iats = append(iats, iat)
+		}
+	}
+
+	features.TotalBytes = float32(totalBytes)
+	features.FwdPackets = float32(fwdPackets)
+	features.BwdPackets = float32(bwdPackets)
+	features.FwdBytes = float32(fwdBytes)
+	features.BwdBytes = float32(bwdBytes)
+
+	if bwdPackets > 0 {
+		features.FwdBwdRatio = float32(fwdPackets) / float32(bwdPackets)
+	}
+
+	if duration > 0 {
+		features.PacketsPerSec = float32(len(packets)) / float32(duration)
+		features.BytesPerSec = float32(totalBytes) / float32(duration)
+	}
+
+	// Packet size statistics
+	if len(sizes) > 0 {
+		minV, maxV, meanV, stdV := computeFloat64Stats(sizes)
+		features.MinPacketLen = float32(minV)
+		features.MaxPacketLen = float32(maxV)
+		features.MeanPacketLen = float32(meanV)
+		features.StdPacketLen = float32(stdV)
+	}
+
+	// IAT statistics
+	if len(iats) > 0 {
+		minV, maxV, meanV, stdV := computeFloat64Stats(iats)
+		features.MinIAT = float32(minV)
+		features.MaxIAT = float32(maxV)
+		features.MeanIAT = float32(meanV)
+		features.StdIAT = float32(stdV)
+	}
+
+	return features
+}
+
+// Clear clears all stored packets.
+func (swe *SlidingWindowExtractor) Clear() {
+	swe.mu.Lock()
+	defer swe.mu.Unlock()
+	swe.packets = swe.packets[:0]
+}
+
+// =============================================================================
+// Feature Normalizer (Enhanced)
+// =============================================================================
+
+// FeatureNormalizer normalizes features for ML input.
+type FeatureNormalizer struct {
+	means  []float32
+	stds   []float32
+	mins   []float32
+	maxs   []float32
+	method NormMethod
+	fitted bool
+	mu     sync.RWMutex
+}
+
+// NormMethod defines the normalization approach.
+type NormMethod int
+
+const (
+	NormMethodStandardize NormMethod = iota // (x - mean) / std
+	NormMethodMinMax                         // (x - min) / (max - min)
+)
+
+// NewFeatureNormalizer creates a new normalizer.
+func NewFeatureNormalizer(method NormMethod) *FeatureNormalizer {
+	return &FeatureNormalizer{method: method}
+}
+
+// Fit computes normalization parameters from training data.
+func (fn *FeatureNormalizer) Fit(data [][]float32) {
+	fn.mu.Lock()
+	defer fn.mu.Unlock()
+
+	if len(data) == 0 || len(data[0]) == 0 {
+		return
+	}
+
+	numFeatures := len(data[0])
+	fn.means = make([]float32, numFeatures)
+	fn.stds = make([]float32, numFeatures)
+	fn.mins = make([]float32, numFeatures)
+	fn.maxs = make([]float32, numFeatures)
+
+	for j := 0; j < numFeatures; j++ {
+		values := make([]float64, len(data))
+		for i, row := range data {
+			values[i] = float64(row[j])
+		}
+
+		minV, maxV, meanV, stdV := computeFloat64Stats(values)
+		fn.mins[j] = float32(minV)
+		fn.maxs[j] = float32(maxV)
+		fn.means[j] = float32(meanV)
+		fn.stds[j] = float32(stdV)
+	}
+
+	fn.fitted = true
+}
+
+// Transform normalizes a single sample.
+func (fn *FeatureNormalizer) Transform(sample []float32) []float32 {
+	fn.mu.RLock()
+	defer fn.mu.RUnlock()
+
+	if !fn.fitted {
+		return sample
+	}
+
+	result := make([]float32, len(sample))
+
+	for i, val := range sample {
+		switch fn.method {
+		case NormMethodStandardize:
+			if fn.stds[i] > 0 {
+				result[i] = (val - fn.means[i]) / fn.stds[i]
+			}
+		case NormMethodMinMax:
+			rang := fn.maxs[i] - fn.mins[i]
+			if rang > 0 {
+				result[i] = (val - fn.mins[i]) / rang
+			}
+		default:
+			result[i] = val
+		}
+	}
+
+	return result
+}
+
+// =============================================================================
+// Feature Selector
+// =============================================================================
+
+// FeatureSelector selects the most important features.
+type FeatureSelector struct {
+	selectedIndices []int
+	importances     []float32
+	threshold       float32
+	maxFeatures     int
+}
+
+// NewFeatureSelector creates a new feature selector.
+func NewFeatureSelector(threshold float32, maxFeatures int) *FeatureSelector {
+	return &FeatureSelector{
+		threshold:   threshold,
+		maxFeatures: maxFeatures,
+	}
+}
+
+// Fit computes feature importances using variance-based selection.
+func (fs *FeatureSelector) Fit(data [][]float32) {
+	if len(data) == 0 || len(data[0]) == 0 {
+		return
+	}
+
+	numFeatures := len(data[0])
+	fs.importances = make([]float32, numFeatures)
+
+	// Compute variance for each feature
+	for j := 0; j < numFeatures; j++ {
+		values := make([]float64, len(data))
+		for i, row := range data {
+			values[i] = float64(row[j])
+		}
+		_, _, _, stdV := computeFloat64Stats(values)
+		fs.importances[j] = float32(stdV * stdV) // variance
+	}
+
+	// Select features above threshold or top maxFeatures
+	type featureScore struct {
+		index      int
+		importance float32
+	}
+
+	scores := make([]featureScore, numFeatures)
+	for i, imp := range fs.importances {
+		scores[i] = featureScore{i, imp}
+	}
+
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].importance > scores[j].importance
+	})
+
+	fs.selectedIndices = make([]int, 0)
+	for i, score := range scores {
+		if i >= fs.maxFeatures {
+			break
+		}
+		if score.importance >= fs.threshold {
+			fs.selectedIndices = append(fs.selectedIndices, score.index)
+		}
+	}
+
+	sort.Ints(fs.selectedIndices)
+}
+
+// Transform selects features from a sample.
+func (fs *FeatureSelector) Transform(sample []float32) []float32 {
+	if len(fs.selectedIndices) == 0 {
+		return sample
+	}
+
+	result := make([]float32, len(fs.selectedIndices))
+	for i, idx := range fs.selectedIndices {
+		if idx < len(sample) {
+			result[i] = sample[idx]
+		}
+	}
+	return result
+}
+
+// GetSelectedIndices returns the indices of selected features.
+func (fs *FeatureSelector) GetSelectedIndices() []int {
+	return fs.selectedIndices
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+func computeFloat64Stats(values []float64) (minV, maxV, mean, std float64) {
+	if len(values) == 0 {
+		return 0, 0, 0, 0
+	}
+
+	minV = values[0]
+	maxV = values[0]
+	var sum float64
+
+	for _, v := range values {
+		sum += v
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+
+	mean = sum / float64(len(values))
+
+	var sumSq float64
+	for _, v := range values {
+		diff := v - mean
+		sumSq += diff * diff
+	}
+
+	variance := sumSq / float64(len(values))
+	std = math.Sqrt(variance)
+
+	return minV, maxV, mean, std
 }

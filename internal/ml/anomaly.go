@@ -1009,3 +1009,469 @@ func hasNumericPattern(s string) bool {
 	
 	return float64(numericCount)/float64(len(s)) > 0.3
 }
+
+
+// =============================================================================
+// Isolation Forest Algorithm
+// =============================================================================
+
+// IsolationForest implements the Isolation Forest algorithm for anomaly detection.
+type IsolationForest struct {
+	trees         []*isolationTree
+	numTrees      int
+	sampleSize    int
+	maxDepth      int
+	contamination float64
+	threshold     float64
+	trained       bool
+	mu            sync.RWMutex
+}
+
+type isolationTree struct {
+	root *isolationNode
+}
+
+type isolationNode struct {
+	feature    int
+	splitValue float64
+	left       *isolationNode
+	right      *isolationNode
+	size       int
+	isLeaf     bool
+}
+
+// IsolationForestConfig holds configuration for Isolation Forest.
+type IsolationForestConfig struct {
+	NumTrees      int
+	SampleSize    int
+	MaxDepth      int
+	Contamination float64
+}
+
+// DefaultIsolationForestConfig returns sensible defaults.
+func DefaultIsolationForestConfig() *IsolationForestConfig {
+	return &IsolationForestConfig{
+		NumTrees:      100,
+		SampleSize:    256,
+		MaxDepth:      8,
+		Contamination: 0.1,
+	}
+}
+
+// NewIsolationForest creates a new Isolation Forest detector.
+func NewIsolationForest(cfg *IsolationForestConfig) *IsolationForest {
+	if cfg == nil {
+		cfg = DefaultIsolationForestConfig()
+	}
+	return &IsolationForest{
+		numTrees:      cfg.NumTrees,
+		sampleSize:    cfg.SampleSize,
+		maxDepth:      cfg.MaxDepth,
+		contamination: cfg.Contamination,
+	}
+}
+
+// Train trains the Isolation Forest on the given data.
+func (ifo *IsolationForest) Train(data [][]float64) error {
+	ifo.mu.Lock()
+	defer ifo.mu.Unlock()
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	ifo.trees = make([]*isolationTree, ifo.numTrees)
+
+	for i := 0; i < ifo.numTrees; i++ {
+		sample := ifoSampleData(data, ifo.sampleSize)
+		ifo.trees[i] = &isolationTree{
+			root: ifo.buildTree(sample, 0),
+		}
+	}
+
+	// Compute threshold based on contamination
+	scores := make([]float64, len(data))
+	for i, sample := range data {
+		scores[i] = ifo.computeScore(sample)
+	}
+	sort.Float64s(scores)
+
+	thresholdIdx := int(float64(len(scores)) * (1 - ifo.contamination))
+	if thresholdIdx >= len(scores) {
+		thresholdIdx = len(scores) - 1
+	}
+	ifo.threshold = scores[thresholdIdx]
+	ifo.trained = true
+	return nil
+}
+
+func (ifo *IsolationForest) buildTree(data [][]float64, depth int) *isolationNode {
+	if len(data) <= 1 || depth >= ifo.maxDepth {
+		return &isolationNode{isLeaf: true, size: len(data)}
+	}
+
+	numFeatures := len(data[0])
+	feature := ifoRandInt(numFeatures)
+
+	minVal, maxVal := data[0][feature], data[0][feature]
+	for _, row := range data {
+		if row[feature] < minVal {
+			minVal = row[feature]
+		}
+		if row[feature] > maxVal {
+			maxVal = row[feature]
+		}
+	}
+
+	if minVal == maxVal {
+		return &isolationNode{isLeaf: true, size: len(data)}
+	}
+
+	splitValue := minVal + ifoRandFloat()*(maxVal-minVal)
+
+	var left, right [][]float64
+	for _, row := range data {
+		if row[feature] < splitValue {
+			left = append(left, row)
+		} else {
+			right = append(right, row)
+		}
+	}
+
+	return &isolationNode{
+		feature:    feature,
+		splitValue: splitValue,
+		left:       ifo.buildTree(left, depth+1),
+		right:      ifo.buildTree(right, depth+1),
+	}
+}
+
+// Predict returns the anomaly score for a sample (0-1, higher = more anomalous).
+func (ifo *IsolationForest) Predict(sample []float64) (float64, error) {
+	ifo.mu.RLock()
+	defer ifo.mu.RUnlock()
+
+	if !ifo.trained {
+		return 0, fmt.Errorf("isolation forest not trained")
+	}
+	return ifo.computeScore(sample), nil
+}
+
+func (ifo *IsolationForest) computeScore(sample []float64) float64 {
+	var totalPathLength float64
+	for _, tree := range ifo.trees {
+		totalPathLength += ifo.pathLength(sample, tree.root, 0)
+	}
+	avgPathLength := totalPathLength / float64(len(ifo.trees))
+	c := ifoAveragePathLength(float64(ifo.sampleSize))
+	return math.Pow(2, -avgPathLength/c)
+}
+
+func (ifo *IsolationForest) pathLength(sample []float64, node *isolationNode, depth int) float64 {
+	if node.isLeaf {
+		return float64(depth) + ifoAveragePathLength(float64(node.size))
+	}
+	if sample[node.feature] < node.splitValue {
+		return ifo.pathLength(sample, node.left, depth+1)
+	}
+	return ifo.pathLength(sample, node.right, depth+1)
+}
+
+// IsAnomaly returns whether the sample is classified as an anomaly.
+func (ifo *IsolationForest) IsAnomaly(sample []float64) (bool, error) {
+	score, err := ifo.Predict(sample)
+	if err != nil {
+		return false, err
+	}
+	return score > ifo.threshold, nil
+}
+
+// =============================================================================
+// Local Outlier Factor (LOF) Algorithm
+// =============================================================================
+
+// LOF implements the Local Outlier Factor algorithm.
+type LOF struct {
+	k          int
+	data       [][]float64
+	distances  [][]float64
+	kDistances []float64
+	lrd        []float64
+	trained    bool
+	mu         sync.RWMutex
+}
+
+// LOFConfig holds configuration for LOF.
+type LOFConfig struct {
+	K int
+}
+
+// DefaultLOFConfig returns sensible defaults.
+func DefaultLOFConfig() *LOFConfig {
+	return &LOFConfig{K: 20}
+}
+
+// NewLOF creates a new LOF detector.
+func NewLOF(cfg *LOFConfig) *LOF {
+	if cfg == nil {
+		cfg = DefaultLOFConfig()
+	}
+	return &LOF{k: cfg.K}
+}
+
+// Train trains the LOF detector.
+func (lof *LOF) Train(data [][]float64) error {
+	lof.mu.Lock()
+	defer lof.mu.Unlock()
+
+	if len(data) < lof.k {
+		return fmt.Errorf("insufficient data: need at least %d samples", lof.k)
+	}
+
+	lof.data = data
+	n := len(data)
+
+	// Compute all pairwise distances
+	lof.distances = make([][]float64, n)
+	for i := 0; i < n; i++ {
+		lof.distances[i] = make([]float64, n)
+		for j := 0; j < n; j++ {
+			if i != j {
+				lof.distances[i][j] = lofEuclideanDistance(data[i], data[j])
+			}
+		}
+	}
+
+	// Compute k-distances
+	lof.kDistances = make([]float64, n)
+	for i := 0; i < n; i++ {
+		dists := make([]float64, 0, n-1)
+		for j := 0; j < n; j++ {
+			if i != j {
+				dists = append(dists, lof.distances[i][j])
+			}
+		}
+		sort.Float64s(dists)
+		lof.kDistances[i] = dists[lof.k-1]
+	}
+
+	// Compute local reachability density
+	lof.lrd = make([]float64, n)
+	for i := 0; i < n; i++ {
+		neighbors := lof.getKNeighbors(i)
+		var sumReachDist float64
+		for _, j := range neighbors {
+			sumReachDist += math.Max(lof.kDistances[j], lof.distances[i][j])
+		}
+		if sumReachDist > 0 {
+			lof.lrd[i] = float64(len(neighbors)) / sumReachDist
+		}
+	}
+
+	lof.trained = true
+	return nil
+}
+
+func (lof *LOF) getKNeighbors(i int) []int {
+	type distIdx struct {
+		dist float64
+		idx  int
+	}
+
+	dists := make([]distIdx, 0, len(lof.data)-1)
+	for j := 0; j < len(lof.data); j++ {
+		if i != j {
+			dists = append(dists, distIdx{lof.distances[i][j], j})
+		}
+	}
+
+	sort.Slice(dists, func(a, b int) bool {
+		return dists[a].dist < dists[b].dist
+	})
+
+	neighbors := make([]int, lof.k)
+	for j := 0; j < lof.k; j++ {
+		neighbors[j] = dists[j].idx
+	}
+	return neighbors
+}
+
+// Predict returns the LOF score for a sample.
+func (lof *LOF) Predict(sample []float64) (float64, error) {
+	lof.mu.RLock()
+	defer lof.mu.RUnlock()
+
+	if !lof.trained {
+		return 0, fmt.Errorf("LOF not trained")
+	}
+
+	// Compute distances to all training points
+	dists := make([]float64, len(lof.data))
+	for i, point := range lof.data {
+		dists[i] = lofEuclideanDistance(sample, point)
+	}
+
+	// Find k nearest neighbors
+	type distIdx struct {
+		dist float64
+		idx  int
+	}
+	sortedDists := make([]distIdx, len(dists))
+	for i, d := range dists {
+		sortedDists[i] = distIdx{d, i}
+	}
+	sort.Slice(sortedDists, func(a, b int) bool {
+		return sortedDists[a].dist < sortedDists[b].dist
+	})
+
+	// Compute LRD for sample
+	var sumReachDist float64
+	for i := 0; i < lof.k; i++ {
+		j := sortedDists[i].idx
+		sumReachDist += math.Max(lof.kDistances[j], sortedDists[i].dist)
+	}
+
+	var sampleLRD float64
+	if sumReachDist > 0 {
+		sampleLRD = float64(lof.k) / sumReachDist
+	}
+
+	// Compute LOF score
+	var sumLRDRatio float64
+	for i := 0; i < lof.k; i++ {
+		j := sortedDists[i].idx
+		if sampleLRD > 0 {
+			sumLRDRatio += lof.lrd[j] / sampleLRD
+		}
+	}
+
+	lofScore := sumLRDRatio / float64(lof.k)
+	// Normalize to 0-1 range (LOF > 1 indicates anomaly)
+	return math.Min(1.0, math.Max(0.0, (lofScore-1.0)/2.0)), nil
+}
+
+// =============================================================================
+// Ensemble Anomaly Detector
+// =============================================================================
+
+// EnsembleAnomalyDetector combines multiple anomaly detection methods.
+type EnsembleAnomalyDetector struct {
+	statistical *StatisticalAnomalyDetector
+	iforest     *IsolationForest
+	lof         *LOF
+	weights     [3]float64 // Weights for each detector
+	mu          sync.RWMutex
+}
+
+// NewEnsembleAnomalyDetector creates a new ensemble detector.
+func NewEnsembleAnomalyDetector(featureNames []string) *EnsembleAnomalyDetector {
+	return &EnsembleAnomalyDetector{
+		statistical: NewStatisticalAnomalyDetector(nil, featureNames),
+		iforest:     NewIsolationForest(nil),
+		lof:         NewLOF(nil),
+		weights:     [3]float64{0.4, 0.35, 0.25}, // Statistical, IForest, LOF
+	}
+}
+
+// Train trains all detectors in the ensemble.
+func (e *EnsembleAnomalyDetector) Train(data [][]float64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Update statistical detector
+	for _, sample := range data {
+		e.statistical.Update(sample)
+	}
+
+	// Train isolation forest
+	if err := e.iforest.Train(data); err != nil {
+		return fmt.Errorf("isolation forest training failed: %w", err)
+	}
+
+	// Train LOF
+	if err := e.lof.Train(data); err != nil {
+		return fmt.Errorf("LOF training failed: %w", err)
+	}
+
+	return nil
+}
+
+// Detect performs ensemble anomaly detection.
+func (e *EnsembleAnomalyDetector) Detect(ctx context.Context, features []float64) (*AnomalyResult, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Get scores from each detector
+	statResult, err := e.statistical.Detect(ctx, features)
+	if err != nil {
+		return nil, err
+	}
+
+	ifoScore, err := e.iforest.Predict(features)
+	if err != nil {
+		ifoScore = 0
+	}
+
+	lofScore, err := e.lof.Predict(features)
+	if err != nil {
+		lofScore = 0
+	}
+
+	// Normalize statistical score to 0-1
+	statScore := math.Min(1.0, statResult.Score/statResult.Threshold)
+
+	// Weighted ensemble score
+	ensembleScore := e.weights[0]*statScore + e.weights[1]*ifoScore + e.weights[2]*lofScore
+
+	return &AnomalyResult{
+		IsAnomaly:            ensembleScore > 0.5,
+		Score:                ensembleScore,
+		Threshold:            0.5,
+		FeatureContributions: statResult.FeatureContributions,
+		Method:               "ensemble",
+		Timestamp:            time.Now(),
+	}, nil
+}
+
+// =============================================================================
+// Helper Functions for Isolation Forest
+// =============================================================================
+
+var ifoRandState uint64 = uint64(time.Now().UnixNano())
+
+func ifoRandInt(max int) int {
+	ifoRandState = ifoRandState*6364136223846793005 + 1442695040888963407
+	return int(ifoRandState>>33) % max
+}
+
+func ifoRandFloat() float64 {
+	ifoRandState = ifoRandState*6364136223846793005 + 1442695040888963407
+	return float64(ifoRandState>>33) / float64(1<<31)
+}
+
+func ifoSampleData(data [][]float64, size int) [][]float64 {
+	if size >= len(data) {
+		return data
+	}
+	sample := make([][]float64, size)
+	for i := 0; i < size; i++ {
+		sample[i] = data[ifoRandInt(len(data))]
+	}
+	return sample
+}
+
+func ifoAveragePathLength(n float64) float64 {
+	if n <= 1 {
+		return 0
+	}
+	return 2.0*(math.Log(n-1)+0.5772156649) - 2.0*(n-1)/n
+}
+
+func lofEuclideanDistance(a, b []float64) float64 {
+	var sum float64
+	for i := range a {
+		diff := a[i] - b[i]
+		sum += diff * diff
+	}
+	return math.Sqrt(sum)
+}
