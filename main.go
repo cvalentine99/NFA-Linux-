@@ -39,6 +39,27 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// initWebKitEnv sets environment variables to fix WebKit rendering issues
+// on newer kernels (6.x+) and Ubuntu 24.04
+func initWebKitEnv() {
+	// Fix for DMA-BUF renderer issues on kernel 6.x+
+	if os.Getenv("WEBKIT_DISABLE_DMABUF_RENDERER") == "" {
+		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+	}
+
+	// Detect if running under Wayland and having issues
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		// Wayland can have compositor conflicts with WebKit
+		// Users can set GDK_BACKEND=x11 if they have issues
+	}
+
+	// For systems with buggy GPU drivers
+	if os.Getenv("NFA_FORCE_SOFTWARE_GL") == "1" {
+		os.Setenv("LIBGL_ALWAYS_SOFTWARE", "1")
+		os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+	}
+}
+
 // Version information (set at build time)
 var (
 	Version   = "0.1.0-dev"
@@ -114,6 +135,9 @@ func main() {
 		return
 	}
 
+	// Initialize WebKit environment for GUI mode
+	initWebKitEnv()
+
 	// Create the application
 	app := NewApp()
 
@@ -137,7 +161,7 @@ func main() {
 		Linux: &linux.Options{
 			Icon:                []byte{},
 			WindowIsTranslucent: false,
-			WebviewGpuPolicy:    linux.WebviewGpuPolicyNever,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyOnDemand,
 			ProgramName:         "nfa-linux",
 		},
 		Debug: options.Debug{

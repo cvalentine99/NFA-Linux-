@@ -2,26 +2,11 @@ import { useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../stores/appStore'
 import type {
   Packet, Flow, Alert, Statistics, CaptureState,
-  TopologyData, ExtractedFile, WailsRuntime
+  TopologyData, ExtractedFile
 } from '../types'
 
-// Wails runtime types (will be provided by Wails at runtime)
-declare global {
-  interface Window {
-    runtime?: WailsRuntime
-    go?: {
-      main?: {
-        App?: {
-          StartCapture: (iface: string) => Promise<void>
-          StopCapture: () => Promise<void>
-          GetInterfaces: () => Promise<string[]>
-          GetStatistics: () => Promise<Statistics>
-          ExportEvidence: (path: string) => Promise<void>
-        }
-      }
-    }
-  }
-}
+// Window type extensions are in types/index.ts
+// Go bindings are available via window.go.main.App
 
 // Event payload types
 interface PacketBatchPayload {
