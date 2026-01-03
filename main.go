@@ -337,37 +337,37 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 	}
 	a.packetsMu.Unlock()
 
-	// Update host tracking (with mutex protection)
+	// RACE-1 FIX: Update host tracking with single lock to prevent TOCTOU race
+	// Both src and dst updates happen under one lock acquisition
+	a.hostsMu.Lock()
 	if info.SrcIP != nil {
 		srcKey := info.SrcIP.String()
-		a.hostsMu.Lock()
-		if _, exists := a.hosts[srcKey]; !exists {
-			a.hosts[srcKey] = &models.Host{
+		host, exists := a.hosts[srcKey]
+		if !exists {
+			host = &models.Host{
 				IP:        info.SrcIP,
 				FirstSeen: pkt.Timestamp,
 			}
+			a.hosts[srcKey] = host
 		}
-		host := a.hosts[srcKey]
 		host.LastSeen = pkt.Timestamp
 		host.PacketCount++
 		host.OutgoingBytes += uint64(info.Length)
-		a.hostsMu.Unlock()
 	}
-
 	if info.DstIP != nil {
 		dstKey := info.DstIP.String()
-		a.hostsMu.Lock()
-		if _, exists := a.hosts[dstKey]; !exists {
-			a.hosts[dstKey] = &models.Host{
+		host, exists := a.hosts[dstKey]
+		if !exists {
+			host = &models.Host{
 				IP:        info.DstIP,
 				FirstSeen: pkt.Timestamp,
 			}
+			a.hosts[dstKey] = host
 		}
-		host := a.hosts[dstKey]
 		host.LastSeen = pkt.Timestamp
 		host.IncomingBytes += uint64(info.Length)
-		a.hostsMu.Unlock()
 	}
+	a.hostsMu.Unlock()
 
 	// Parse DNS
 	if info.DstPort == 53 || info.SrcPort == 53 {

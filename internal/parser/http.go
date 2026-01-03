@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
+)
+
+// BUG-3 FIX: Constants for pending request management
+const (
+	// MaxPendingHTTPRequests is the maximum number of unmatched requests to keep
+	MaxPendingHTTPRequests = 1000
+	// PendingRequestTimeout is how long to keep unmatched requests (5 minutes)
+	PendingRequestTimeout = 5 * time.Minute
 )
 
 // HTTPParser parses HTTP/1.x traffic from TCP streams.
@@ -28,6 +37,9 @@ type HTTPParser struct {
 	// State
 	buffer        bytes.Buffer
 	pendingReqs   []*HTTPRequest
+	
+	// BUG-3 FIX: Track pending request count for memory management
+	lastCleanup   time.Time
 }
 
 // HTTPRequest represents a parsed HTTP request.
@@ -124,14 +136,48 @@ func (p *HTTPParser) ParseRequest(data []byte, timestampNano int64) (*HTTPReques
 		p.extractCredentials(auth, req.URL.String(), timestampNano)
 	}
 
-	// Store pending request for response matching
-	p.pendingReqs = append(p.pendingReqs, httpReq)
+	// BUG-3 FIX: Enforce limit on pending requests to prevent memory leak
+	// Clean up old requests periodically
+	now := time.Now()
+	if now.Sub(p.lastCleanup) > time.Minute {
+		p.cleanupOldPendingRequests(now)
+		p.lastCleanup = now
+	}
+	
+	// Only store if under limit
+	if len(p.pendingReqs) < MaxPendingHTTPRequests {
+		p.pendingReqs = append(p.pendingReqs, httpReq)
+	} else {
+		// Drop oldest request to make room (FIFO eviction)
+		p.pendingReqs = append(p.pendingReqs[1:], httpReq)
+	}
 
 	if p.onRequest != nil {
 		p.onRequest(httpReq)
 	}
 
 	return httpReq, nil
+}
+
+// cleanupOldPendingRequests removes requests older than PendingRequestTimeout
+// BUG-3 FIX: Prevents unbounded growth of pending requests
+func (p *HTTPParser) cleanupOldPendingRequests(now time.Time) {
+	cutoff := now.Add(-PendingRequestTimeout).UnixNano()
+	
+	// Find first non-expired request
+	firstValid := 0
+	for i, req := range p.pendingReqs {
+		if req.TimestampNano >= cutoff {
+			firstValid = i
+			break
+		}
+		firstValid = i + 1
+	}
+	
+	// Remove expired requests
+	if firstValid > 0 {
+		p.pendingReqs = p.pendingReqs[firstValid:]
+	}
 }
 
 // ParseResponse parses an HTTP response from raw data.
@@ -335,7 +381,22 @@ func (p *HTTPParser) guessExtension(contentType string) string {
 	return ".bin"
 }
 
-// decompressGzip decompresses gzip-encoded data.
+// SEC-5 FIX: Decompression bomb protection constants
+const (
+	// MaxDecompressedSize is the maximum allowed decompressed size (10MB)
+	MaxDecompressedSize = 10 * 1024 * 1024
+	// MaxCompressionRatio is the maximum allowed compression ratio (100:1)
+	// Ratios above this indicate a potential decompression bomb
+	MaxCompressionRatio = 100
+	// DecompressChunkSize is the size of chunks read during decompression
+	DecompressChunkSize = 64 * 1024
+)
+
+// ErrDecompressionBomb is returned when a decompression bomb is detected
+var ErrDecompressionBomb = errors.New("decompression bomb detected: ratio exceeds safe threshold")
+
+// decompressGzip decompresses gzip-encoded data with bomb detection.
+// SEC-5 FIX: Implements ratio-based detection to prevent decompression bombs.
 func (p *HTTPParser) decompressGzip(data []byte) ([]byte, error) {
 	reader, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
@@ -343,7 +404,44 @@ func (p *HTTPParser) decompressGzip(data []byte) ([]byte, error) {
 	}
 	defer reader.Close()
 
-	return io.ReadAll(io.LimitReader(reader, 100*1024*1024)) // 100MB limit
+	compressedSize := int64(len(data))
+	if compressedSize == 0 {
+		return nil, errors.New("empty compressed data")
+	}
+
+	// Read in chunks and check ratio progressively
+	var result bytes.Buffer
+	buf := make([]byte, DecompressChunkSize)
+	var totalRead int64
+
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			totalRead += int64(n)
+			
+			// Check absolute size limit
+			if totalRead > MaxDecompressedSize {
+				return nil, fmt.Errorf("decompressed size exceeds limit: %d > %d", totalRead, MaxDecompressedSize)
+			}
+			
+			// Check compression ratio (bomb detection)
+			ratio := totalRead / compressedSize
+			if ratio > MaxCompressionRatio {
+				return nil, ErrDecompressionBomb
+			}
+			
+			result.Write(buf[:n])
+		}
+		
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decompression error: %w", err)
+		}
+	}
+
+	return result.Bytes(), nil
 }
 
 // IsHTTPRequest checks if data looks like an HTTP request.

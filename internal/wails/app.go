@@ -378,14 +378,64 @@ func (a *App) flushEvents(batch *events.Batch) {
 }
 
 // statsUpdateLoop periodically emits statistics updates
+// RACE-3 FIX: Creates a deep copy of stats to prevent race with JSON encoding
 func (a *App) statsUpdateLoop() {
 	for range a.statsTimer.C {
 		a.statsMu.RLock()
-		stats := *a.stats
+		// RACE-3 FIX: Deep copy all fields to prevent concurrent access during JSON encoding
+		// Uses local Statistics struct which has nested fields
+		statsCopy := Statistics{
+			Packets: struct {
+				Total int64 `json:"total"`
+				TCP   int64 `json:"tcp"`
+				UDP   int64 `json:"udp"`
+				ICMP  int64 `json:"icmp"`
+				Other int64 `json:"other"`
+			}{
+				Total: a.stats.Packets.Total,
+				TCP:   a.stats.Packets.TCP,
+				UDP:   a.stats.Packets.UDP,
+				ICMP:  a.stats.Packets.ICMP,
+				Other: a.stats.Packets.Other,
+			},
+			Bytes: struct {
+				Total    int64 `json:"total"`
+				Inbound  int64 `json:"inbound"`
+				Outbound int64 `json:"outbound"`
+			}{
+				Total:    a.stats.Bytes.Total,
+				Inbound:  a.stats.Bytes.Inbound,
+				Outbound: a.stats.Bytes.Outbound,
+			},
+			Flows: struct {
+				Total     int64 `json:"total"`
+				Active    int64 `json:"active"`
+				Completed int64 `json:"completed"`
+			}{
+				Total:     a.stats.Flows.Total,
+				Active:    a.stats.Flows.Active,
+				Completed: a.stats.Flows.Completed,
+			},
+		}
+		// Deep copy maps to prevent race
+		if a.stats.Protocols != nil {
+			statsCopy.Protocols = make(map[string]int64, len(a.stats.Protocols))
+			for k, v := range a.stats.Protocols {
+				statsCopy.Protocols[k] = v
+			}
+		}
+		if a.stats.TopTalkers != nil {
+			statsCopy.TopTalkers = make([]TopTalker, len(a.stats.TopTalkers))
+			copy(statsCopy.TopTalkers, a.stats.TopTalkers)
+		}
+		if a.stats.TopPorts != nil {
+			statsCopy.TopPorts = make([]TopPort, len(a.stats.TopPorts))
+			copy(statsCopy.TopPorts, a.stats.TopPorts)
+		}
 		a.statsMu.RUnlock()
 
 		runtime.EventsEmit(a.ctx, "stats:update", map[string]interface{}{
-			"stats":     stats,
+			"stats":     statsCopy,
 			"timestamp": time.Now().UnixNano(),
 		})
 	}

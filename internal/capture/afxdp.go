@@ -148,6 +148,9 @@ type xdpWorker struct {
 	engine   *AFXDPEngine
 	running  atomic.Bool
 
+	// RACE-4 FIX: Ensure cleanup only runs once
+	cleanupOnce sync.Once
+
 	// Socket and UMEM
 	fd       int
 	umem     []byte
@@ -305,9 +308,13 @@ func (e *AFXDPEngine) Start(ctx context.Context) error {
 }
 
 // collectKernelStats periodically reads kernel XDP statistics
+// BUG-4 FIX: Stores previous stats per worker and only adds delta to prevent counter explosion
 func (e *AFXDPEngine) collectKernelStats(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	
+	// BUG-4 FIX: Track previous stats per worker to compute delta
+	prevStats := make(map[int]xdpStatistics)
 	
 	for {
 		select {
@@ -317,10 +324,23 @@ func (e *AFXDPEngine) collectKernelStats(ctx context.Context) {
 			e.mu.RLock()
 			for _, w := range e.workers {
 				if w != nil && w.fd > 0 {
-					stats := w.getKernelStats()
-					atomic.AddUint64(&e.stats.kernelRxDropped, stats.rxDropped)
-					atomic.AddUint64(&e.stats.kernelRxRingFull, stats.rxRingFull)
-					atomic.AddUint64(&e.stats.kernelFillEmpty, stats.rxFillRingEmpty)
+					currentStats := w.getKernelStats()
+					prev := prevStats[w.id]
+					
+					// BUG-4 FIX: Only add the delta (new drops since last check)
+					// Kernel counters are cumulative, so we subtract previous values
+					if currentStats.rxDropped > prev.rxDropped {
+						atomic.AddUint64(&e.stats.kernelRxDropped, currentStats.rxDropped-prev.rxDropped)
+					}
+					if currentStats.rxRingFull > prev.rxRingFull {
+						atomic.AddUint64(&e.stats.kernelRxRingFull, currentStats.rxRingFull-prev.rxRingFull)
+					}
+					if currentStats.rxFillRingEmpty > prev.rxFillRingEmpty {
+						atomic.AddUint64(&e.stats.kernelFillEmpty, currentStats.rxFillRingEmpty-prev.rxFillRingEmpty)
+					}
+					
+					// Store current as previous for next iteration
+					prevStats[w.id] = currentStats
 				}
 			}
 			e.mu.RUnlock()
@@ -549,23 +569,26 @@ func (e *AFXDPEngine) stopWorkers() {
 }
 
 // cleanup releases worker resources
+// RACE-4 FIX: Uses sync.Once to prevent double cleanup from defer + stopWorkers()
 func (w *xdpWorker) cleanup() {
-	if w.fillRingMem != nil {
-		unix.Munmap(w.fillRingMem)
-		w.fillRingMem = nil
-	}
-	if w.rxRingMem != nil {
-		unix.Munmap(w.rxRingMem)
-		w.rxRingMem = nil
-	}
-	if w.umem != nil {
-		unix.Munmap(w.umem)
-		w.umem = nil
-	}
-	if w.fd > 0 {
-		unix.Close(w.fd)
-		w.fd = 0
-	}
+	w.cleanupOnce.Do(func() {
+		if w.fillRingMem != nil {
+			unix.Munmap(w.fillRingMem)
+			w.fillRingMem = nil
+		}
+		if w.rxRingMem != nil {
+			unix.Munmap(w.rxRingMem)
+			w.rxRingMem = nil
+		}
+		if w.umem != nil {
+			unix.Munmap(w.umem)
+			w.umem = nil
+		}
+		if w.fd > 0 {
+			unix.Close(w.fd)
+			w.fd = 0
+		}
+	})
 }
 
 // Stop halts AF_XDP packet capture.

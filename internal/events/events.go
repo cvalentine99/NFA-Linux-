@@ -5,6 +5,7 @@ package events
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cvalentine99/nfa-linux/internal/models"
@@ -81,10 +82,10 @@ type EventBus struct {
 	currentBatch []*Event
 	batchTimer   *time.Timer
 
-	// Statistics
-	eventsEmitted   uint64
-	eventsBatched   uint64
-	batchesSent     uint64
+	// Statistics - RACE-2 FIX: Use atomic counters to prevent race conditions
+	eventsEmitted   atomic.Uint64
+	eventsBatched   atomic.Uint64
+	batchesSent     atomic.Uint64
 }
 
 // EventBusConfig holds configuration for the event bus.
@@ -179,7 +180,7 @@ func (eb *EventBus) addToBatch(event *Event) {
 	defer eb.batchMu.Unlock()
 
 	eb.currentBatch = append(eb.currentBatch, event)
-	eb.eventsBatched++
+	eb.eventsBatched.Add(1) // RACE-2 FIX: Atomic increment
 
 	// Start timer if this is the first event in the batch
 	if len(eb.currentBatch) == 1 {
@@ -216,7 +217,7 @@ func (eb *EventBus) flushBatchLocked() {
 		eb.dispatchEvent(event)
 	}
 
-	eb.batchesSent++
+	eb.batchesSent.Add(1) // RACE-2 FIX: Atomic increment
 	eb.currentBatch = eb.currentBatch[:0]
 }
 
@@ -225,7 +226,7 @@ func (eb *EventBus) dispatchEvent(event *Event) {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
 
-	eb.eventsEmitted++
+	eb.eventsEmitted.Add(1) // RACE-2 FIX: Atomic increment
 
 	// Call global handler
 	if eb.globalHandler != nil {
@@ -247,9 +248,8 @@ func (eb *EventBus) Flush() {
 
 // Stats returns event bus statistics.
 func (eb *EventBus) Stats() (emitted, batched, batches uint64) {
-	eb.batchMu.Lock()
-	defer eb.batchMu.Unlock()
-	return eb.eventsEmitted, eb.eventsBatched, eb.batchesSent
+	// RACE-2 FIX: Atomic loads don't require lock
+	return eb.eventsEmitted.Load(), eb.eventsBatched.Load(), eb.batchesSent.Load()
 }
 
 // Helper functions for common event types
