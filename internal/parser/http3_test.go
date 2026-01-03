@@ -26,11 +26,16 @@ func TestHTTP3Parser_ParseSettingsFrame(t *testing.T) {
 	parser := NewHTTP3Parser()
 	
 	// SETTINGS frame with QPACK_MAX_TABLE_CAPACITY = 4096
+	// QUIC varint encoding: 4096 = 0x1000, needs 2-byte encoding (prefix 01)
+	// 2-byte format: 01xxxxxx xxxxxxxx where value = (first & 0x3F) << 8 | second
+	// 4096 = 0x1000, so first byte = 0x40 | 0x10 = 0x50, second = 0x00
+	// Setting ID 0x01 is a 1-byte varint
+	// Total payload: 1 (setting ID) + 2 (value) = 3 bytes
 	data := []byte{
-		0x04,       // Frame type: SETTINGS
-		0x04,       // Length: 4
-		0x01,       // Setting ID: QPACK_MAX_TABLE_CAPACITY
-		0x50, 0x00, // Value: 4096 (variable int)
+		0x04,       // Frame type: SETTINGS (1-byte varint)
+		0x03,       // Length: 3 bytes (1-byte varint)
+		0x01,       // Setting ID: QPACK_MAX_TABLE_CAPACITY (1-byte varint)
+		0x50, 0x00, // Value: 4096 (2-byte varint: 0x50 = 01|010000, 0x00)
 	}
 	
 	err := parser.ParseStreamData(2, data, time.Now().UnixNano()) // Control stream
@@ -70,6 +75,21 @@ func TestQPACKDecoder_DecodeInteger(t *testing.T) {
 }
 
 func TestQPACKDecoder_StaticTable(t *testing.T) {
+	// QPACK static table indices (RFC 9204 Appendix A)
+	// Based on the actual qpackStaticTable in http3.go:
+	// Index 0: :authority
+	// Index 1: :path /
+	// Index 15: :method CONNECT
+	// Index 16: :method DELETE  
+	// Index 17: :method GET
+	// Index 18: :method HEAD
+	// Index 19: :method OPTIONS
+	// Index 20: :method POST
+	// Index 21: :method PUT
+	// Index 22: :scheme http
+	// Index 23: :scheme https
+	// Index 24: :status 103
+	// Index 25: :status 200
 	tests := []struct {
 		index    int
 		name     string
@@ -78,7 +98,7 @@ func TestQPACKDecoder_StaticTable(t *testing.T) {
 		{0, ":authority", ""},
 		{1, ":path", "/"},
 		{17, ":method", "GET"},
-		{21, ":method", "POST"},
+		{20, ":method", "POST"},  // Fixed: POST is at index 20, not 21
 		{23, ":scheme", "https"},
 		{25, ":status", "200"},
 	}

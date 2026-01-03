@@ -140,6 +140,9 @@ func TestIsAdminShare(t *testing.T) {
 }
 
 func TestIsPsExecPattern(t *testing.T) {
+	// isPsExecPattern returns true for known lateral movement tool patterns
+	// regardless of share name (PSEXESVC, PAEXEC, CSEXEC, REMCOM, WINEXESVC)
+	// The share name only affects the ADMIN$ specific check for generic suspicious files
 	tests := []struct {
 		fileName  string
 		shareName string
@@ -149,7 +152,7 @@ func TestIsPsExecPattern(t *testing.T) {
 		{"psexesvc.exe", "\\\\server\\admin$", true},
 		{"PAEXEC.exe", "\\\\server\\ADMIN$", true},
 		{"notepad.exe", "\\\\server\\ADMIN$", false},
-		{"PSEXESVC.exe", "\\\\server\\share", false},
+		{"PSEXESVC.exe", "\\\\server\\share", true},  // Fixed: PSEXESVC is always flagged
 		{"REMCOM.exe", "\\\\server\\share", true},
 	}
 	

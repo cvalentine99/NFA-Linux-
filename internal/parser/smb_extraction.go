@@ -702,8 +702,16 @@ func isSuspiciousUpload(fileName, shareName string) bool {
 
 // sanitizeFileName creates a safe filename.
 func sanitizeFileName(fileName string) string {
-	// Extract just the filename from path (prevents path traversal)
+	// Handle both Unix and Windows path separators
+	// filepath.Base only handles the OS-native separator, so we need to
+	// manually handle Windows paths when running on Linux
 	base := filepath.Base(fileName)
+	
+	// If we're on Linux and the path contains Windows separators,
+	// filepath.Base won't extract the filename properly
+	if idx := strings.LastIndex(base, "\\"); idx >= 0 {
+		base = base[idx+1:]
+	}
 	
 	// Explicitly reject any path traversal attempts
 	if strings.Contains(base, "..") || strings.HasPrefix(base, "/") || strings.HasPrefix(base, "\\") {
@@ -732,21 +740,26 @@ func detectMIMEType(data []byte) string {
 	}
 	
 	// Check magic bytes
-	magicTypes := map[string][]byte{
-		"application/pdf":               {0x25, 0x50, 0x44, 0x46},
-		"application/zip":               {0x50, 0x4B, 0x03, 0x04},
-		"application/x-rar-compressed":  {0x52, 0x61, 0x72, 0x21},
-		"application/gzip":              {0x1F, 0x8B},
-		"image/png":                     {0x89, 0x50, 0x4E, 0x47},
-		"image/jpeg":                    {0xFF, 0xD8, 0xFF},
-		"image/gif":                     {0x47, 0x49, 0x46, 0x38},
-		"application/x-msdownload":      {0x4D, 0x5A}, // MZ header
-		"application/x-dosexec":         {0x4D, 0x5A},
+	// Note: Using ordered slice instead of map to ensure consistent results
+	// for overlapping magic bytes (e.g., MZ header)
+	type magicEntry struct {
+		mimeType string
+		magic    []byte
+	}
+	magicTypes := []magicEntry{
+		{"application/pdf", []byte{0x25, 0x50, 0x44, 0x46}},
+		{"application/zip", []byte{0x50, 0x4B, 0x03, 0x04}},
+		{"application/x-rar-compressed", []byte{0x52, 0x61, 0x72, 0x21}},
+		{"application/gzip", []byte{0x1F, 0x8B}},
+		{"image/png", []byte{0x89, 0x50, 0x4E, 0x47}},
+		{"image/jpeg", []byte{0xFF, 0xD8, 0xFF}},
+		{"image/gif", []byte{0x47, 0x49, 0x46, 0x38}},
+		{"application/x-msdownload", []byte{0x4D, 0x5A}}, // MZ header for EXE/DLL
 	}
 	
-	for mimeType, magic := range magicTypes {
-		if len(data) >= len(magic) && bytes.HasPrefix(data, magic) {
-			return mimeType
+	for _, entry := range magicTypes {
+		if len(data) >= len(entry.magic) && bytes.HasPrefix(data, entry.magic) {
+			return entry.mimeType
 		}
 	}
 	

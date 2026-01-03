@@ -43,6 +43,9 @@ func TestDNSParserQuery(t *testing.T) {
 		SrcPort: 54321,
 		DstPort: 53,
 	}
+	
+	// Set network layer for UDP checksum computation
+	udpLayer.SetNetworkLayerForChecksum(ipLayer)
 
 	// Serialize the layers
 	buf := gopacket.NewSerializeBuffer()
