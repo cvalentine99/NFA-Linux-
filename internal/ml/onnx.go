@@ -3,6 +3,7 @@ package ml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -228,7 +229,7 @@ func (e *ONNXEngine) PredictBatch(ctx context.Context, inputs [][]float32) ([][]
 			defer wg.Done()
 			result, err := e.Predict(ctx, data)
 			if err != nil {
-				errChan <- err
+				errChan <- fmt.Errorf("input[%d]: %w", idx, err)
 				return
 			}
 			results[idx] = result
@@ -238,8 +239,14 @@ func (e *ONNXEngine) PredictBatch(ctx context.Context, inputs [][]float32) ([][]
 	wg.Wait()
 	close(errChan)
 
-	if err := <-errChan; err != nil {
-		return nil, err
+	// Aggregate all errors instead of returning only the first one
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return results, fmt.Errorf("batch inference failed for %d/%d inputs: %w", len(errs), len(inputs), errors.Join(errs...))
 	}
 
 	return results, nil

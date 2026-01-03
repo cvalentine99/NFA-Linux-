@@ -83,6 +83,7 @@ type Stream struct {
 	bufferedPages int
 	closed        bool
 	userData      interface{}
+	listElement   *list.Element // Reference to position in streamsList for O(1) removal
 }
 
 // SetUserData sets user-defined data on the stream.
@@ -393,7 +394,7 @@ func (tr *TCPReassembler) getOrCreateStream(
 	}
 
 	tr.streams[key] = stream
-	tr.streamsList.PushBack(stream)
+	stream.listElement = tr.streamsList.PushBack(stream)
 	atomic.AddInt64(&tr.activeStreams, 1)
 	atomic.AddUint64(&tr.stats.StreamsCreated, 1)
 
@@ -409,10 +410,16 @@ func (tr *TCPReassembler) closeStream(stream *Stream) {
 	}
 	stream.closed = true
 	stream.State = "CLOSED"
+	listElem := stream.listElement
+	stream.listElement = nil
 	stream.mu.Unlock()
 
 	tr.streamsMu.Lock()
 	delete(tr.streams, stream.ID)
+	// Remove from streamsList to prevent memory leak
+	if listElem != nil {
+		tr.streamsList.Remove(listElem)
+	}
 	tr.streamsMu.Unlock()
 
 	atomic.AddInt64(&tr.activeStreams, -1)

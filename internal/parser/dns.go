@@ -14,15 +14,29 @@ import (
 	"github.com/cvalentine99/nfa-linux/internal/models"
 )
 
+const (
+	// MaxDNSLabelDepth limits DNS label/compression pointer recursion to prevent DoS.
+	// RFC 1035 allows up to 255 bytes total, with 63-byte max per label.
+	// A depth of 128 is generous but prevents infinite loops from malformed packets.
+	MaxDNSLabelDepth = 128
+
+	// MaxDNSNameLength is the maximum length of a DNS name (RFC 1035).
+	MaxDNSNameLength = 255
+)
+
 // DNSParser parses DNS packets and extracts query/response information.
 type DNSParser struct {
 	// Callback for DNS records
 	onRecord func(*models.DNSRecord)
+	// MaxLabelDepth limits recursion for compression pointer following
+	MaxLabelDepth int
 }
 
 // NewDNSParser creates a new DNS parser.
 func NewDNSParser() *DNSParser {
-	return &DNSParser{}
+	return &DNSParser{
+		MaxLabelDepth: MaxDNSLabelDepth,
+	}
 }
 
 // SetRecordHandler sets the callback for DNS records.
@@ -131,10 +145,21 @@ func (p *DNSParser) ParseFromLayers(
 }
 
 // extractAnswers extracts answer records from a DNS response.
+// Validates name lengths to prevent DoS from malformed packets.
 func (p *DNSParser) extractAnswers(dns *layers.DNS, queryName []byte) []string {
 	var answers []string
 
+	// Limit total answers to prevent memory exhaustion
+	maxAnswers := 256
+	if len(dns.Answers) > maxAnswers {
+		return nil // Suspicious packet, skip
+	}
+
 	for _, ans := range dns.Answers {
+		// Validate name length (RFC 1035: max 255 bytes)
+		if len(ans.Name) > MaxDNSNameLength {
+			continue // Skip malformed answer
+		}
 		if !strings.EqualFold(string(ans.Name), string(queryName)) {
 			continue
 		}
