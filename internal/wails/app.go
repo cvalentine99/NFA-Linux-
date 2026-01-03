@@ -406,3 +406,93 @@ func (a *App) emitError(message string, code string) {
 		"code":    code,
 	})
 }
+
+// SetBPFFilter sets a BPF filter on the capture engine
+func (a *App) SetBPFFilter(filter string) error {
+	a.captureMu.RLock()
+	defer a.captureMu.RUnlock()
+
+	if a.captureEngine == nil {
+		return fmt.Errorf("capture not running")
+	}
+
+	return a.captureEngine.SetBPFFilter(filter)
+}
+
+// GetTopology returns the current network topology data
+func (a *App) GetTopology() *TopologyData {
+	a.statsMu.RLock()
+	defer a.statsMu.RUnlock()
+
+	// Build topology from current statistics
+	topology := &TopologyData{
+		Nodes: make([]TopologyNode, 0),
+		Links: make([]TopologyLink, 0),
+	}
+
+	// Add nodes from top talkers
+	for i, talker := range a.stats.TopTalkers {
+		topology.Nodes = append(topology.Nodes, TopologyNode{
+			ID:      talker.IP,
+			Label:   talker.IP,
+			Type:    "host",
+			Packets: talker.Packets,
+			Bytes:   talker.Bytes,
+			X:       float64(i * 100),
+			Y:       float64(i * 50),
+		})
+	}
+
+	return topology
+}
+
+// TopologyData represents network topology for visualization
+type TopologyData struct {
+	Nodes []TopologyNode `json:"nodes"`
+	Links []TopologyLink `json:"links"`
+}
+
+// TopologyNode represents a node in the network topology
+type TopologyNode struct {
+	ID      string  `json:"id"`
+	Label   string  `json:"label"`
+	Type    string  `json:"type"` // host, router, server, etc.
+	Packets int64   `json:"packets"`
+	Bytes   int64   `json:"bytes"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+}
+
+// TopologyLink represents a connection between nodes
+type TopologyLink struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	Protocol string `json:"protocol"`
+	Packets  int64  `json:"packets"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// AcknowledgeAlert marks an alert as acknowledged
+func (a *App) AcknowledgeAlert(id string) error {
+	// Emit acknowledgment event to frontend
+	runtime.EventsEmit(a.ctx, "alert:acknowledged", map[string]interface{}{
+		"id":        id,
+		"timestamp": time.Now().UnixNano(),
+	})
+	return nil
+}
+
+// ResetStatistics resets all capture statistics
+func (a *App) ResetStatistics() {
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+
+	a.stats = &Statistics{
+		Protocols: make(map[string]int64),
+	}
+}
+
+// GetVersion returns the application version
+func (a *App) GetVersion() string {
+	return "1.0.0"
+}
