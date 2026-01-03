@@ -240,11 +240,64 @@ sudo apt-get install libfuse2
 
 ## Package Sizes
 
+### x86_64 (AMD64)
+
 | Package | Size | Notes |
 |---------|------|-------|
 | Debian | ~4.0 MB | Compressed with dpkg |
 | AppImage | ~4.9 MB | Compressed with squashfs |
 | Raw Binary | ~13 MB | Uncompressed |
+
+### ARM64 (aarch64)
+
+| Package | Size | Notes |
+|---------|------|-------|
+| Debian | ~3.7 MB | Compressed with dpkg |
+| Tarball | ~4.3 MB | Compressed with gzip |
+| Raw Binary | ~12 MB | Uncompressed |
+
+## Building ARM64 Packages
+
+For ARM64 systems (NVIDIA Grace, Raspberry Pi 4/5, Apple Silicon VMs, AWS Graviton):
+
+### Prerequisites
+
+```bash
+# Install cross-compilation toolchain
+sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+# Add ARM64 architecture
+sudo dpkg --add-architecture arm64
+
+# Add ARM64 repositories
+sudo bash -c 'cat > /etc/apt/sources.list.d/arm64.list << EOF
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+EOF'
+
+# Install ARM64 development libraries
+sudo apt-get update
+sudo apt-get install -y libgtk-3-dev:arm64 libwebkit2gtk-4.1-dev:arm64 libpcap-dev:arm64
+```
+
+### Build ARM64 Binary
+
+```bash
+export CGO_ENABLED=1
+export GOOS=linux
+export GOARCH=arm64
+export CC=aarch64-linux-gnu-gcc
+export CXX=aarch64-linux-gnu-g++
+export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+
+wails build -clean -tags webkit2_41 -platform linux/arm64
+```
+
+### Build ARM64 Packages
+
+```bash
+./scripts/build-arm64-packages.sh all 1.0.0
+```
 
 ## Security Considerations
 
