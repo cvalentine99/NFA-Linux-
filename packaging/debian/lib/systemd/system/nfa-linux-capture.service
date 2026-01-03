@@ -1,0 +1,39 @@
+[Unit]
+Description=NFA-Linux Network Capture Service
+Documentation=https://github.com/cvalentine99/NFA-Linux-
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=nfa-linux
+ExecStart=/usr/bin/nfa-linux --headless --capture --interface=%i
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/nfa-linux
+ReadOnlyPaths=/etc/nfa-linux
+
+# Capabilities for packet capture
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nfa-linux
+
+[Install]
+WantedBy=multi-user.target

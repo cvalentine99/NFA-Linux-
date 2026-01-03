@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+# Post-installation script for nfa-linux
+
+# Create nfa-linux group if it doesn't exist
+if ! getent group nfa-linux > /dev/null 2>&1; then
+    groupadd --system nfa-linux
+    echo "Created system group: nfa-linux"
+fi
+
+# Set capabilities for packet capture without root
+if [ -f /usr/bin/nfa-linux ]; then
+    setcap cap_net_raw,cap_net_admin=eip /usr/bin/nfa-linux 2>/dev/null || true
+    echo "Set network capture capabilities on /usr/bin/nfa-linux"
+fi
+
+# Create evidence directory
+if [ ! -d /var/lib/nfa-linux ]; then
+    mkdir -p /var/lib/nfa-linux/evidence
+    mkdir -p /var/lib/nfa-linux/captures
+    mkdir -p /var/lib/nfa-linux/logs
+    chown -R root:nfa-linux /var/lib/nfa-linux
+    chmod -R 2770 /var/lib/nfa-linux
+    echo "Created data directories in /var/lib/nfa-linux"
+fi
+
+# Create config directory
+if [ ! -d /etc/nfa-linux ]; then
+    mkdir -p /etc/nfa-linux
+fi
+
+# Update icon cache
+if command -v update-icon-caches > /dev/null 2>&1; then
+    update-icon-caches /usr/share/icons/hicolor 2>/dev/null || true
+fi
+
+# Update desktop database
+if command -v update-desktop-database > /dev/null 2>&1; then
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  NFA-Linux installed successfully!                          ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+echo "║  To capture packets without root, add your user to the      ║"
+echo "║  nfa-linux group:                                           ║"
+echo "║                                                              ║"
+echo "║    sudo usermod -aG nfa-linux \$USER                         ║"
+echo "║                                                              ║"
+echo "║  Then log out and back in for changes to take effect.       ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+
+exit 0

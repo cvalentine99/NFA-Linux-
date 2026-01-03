@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=NFA-Linux
+GenericName=Network Forensics Analyzer
+Comment=Next-generation network forensics and packet analysis for DFIR professionals
+Exec=nfa-linux %F
+Icon=nfa-linux
+Terminal=false
+Categories=Network;Security;System;Monitor;
+Keywords=network;forensics;packet;capture;analysis;security;wireshark;pcap;dfir;
+StartupWMClass=nfa-linux
+StartupNotify=true
+MimeType=application/vnd.tcpdump.pcap;application/x-pcapng;
+
+# Actions
+Actions=capture;analyze;
+
+[Desktop Action capture]
+Name=Start Capture
+Exec=nfa-linux --capture
+
+[Desktop Action analyze]
+Name=Analyze PCAP
+Exec=nfa-linux --analyze %F

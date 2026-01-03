@@ -1,0 +1,32 @@
+#!/bin/bash
+set -e
+
+# Post-removal script for nfa-linux
+
+case "$1" in
+    purge)
+        # Remove data directories on purge
+        rm -rf /var/lib/nfa-linux
+        rm -rf /etc/nfa-linux
+        
+        # Remove group if no users remain
+        if getent group nfa-linux > /dev/null 2>&1; then
+            groupdel nfa-linux 2>/dev/null || true
+        fi
+        
+        echo "NFA-Linux data and configuration removed."
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Update icon cache
+        if command -v update-icon-caches > /dev/null 2>&1; then
+            update-icon-caches /usr/share/icons/hicolor 2>/dev/null || true
+        fi
+        
+        # Update desktop database
+        if command -v update-desktop-database > /dev/null 2>&1; then
+            update-desktop-database /usr/share/applications 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

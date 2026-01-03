@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+# Pre-removal script for nfa-linux
+
+# Stop any running instances (if systemd service exists)
+if systemctl is-active --quiet nfa-linux 2>/dev/null; then
+    systemctl stop nfa-linux || true
+fi
+
+if systemctl is-enabled --quiet nfa-linux 2>/dev/null; then
+    systemctl disable nfa-linux || true
+fi
+
+exit 0
