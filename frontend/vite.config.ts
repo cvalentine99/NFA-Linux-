@@ -14,12 +14,7 @@ export default defineConfig({
       '@stores': path.resolve(__dirname, './src/stores'),
       '@types': path.resolve(__dirname, './src/types'),
       '@utils': path.resolve(__dirname, './src/utils'),
-      // Fix three.js webgpu import issue
-      'three/webgpu': 'three',
     },
-  },
-  optimizeDeps: {
-    exclude: ['three/webgpu'],
   },
   build: {
     outDir: 'dist',
@@ -31,11 +26,10 @@ export default defineConfig({
         manualChunks: {
           'react-vendor': ['react', 'react-dom'],
           'table-vendor': ['@tanstack/react-virtual', '@tanstack/react-table'],
-          'viz-vendor': ['d3', 'recharts', 'three', 'react-force-graph-3d'],
+          'viz-vendor': ['d3', 'recharts'],
           'editor-vendor': ['@monaco-editor/react'],
         },
       },
-      external: ['three/webgpu'],
     },
   },
   server: {
