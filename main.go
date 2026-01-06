@@ -704,51 +704,6 @@ func protocolName(proto uint8) string {
 	}
 }
 
-// App represents the main application.
-type App struct {
-	ctx context.Context
-}
-
-// NewApp creates a new App instance.
-func NewApp() *App {
-	return &App{}
-}
-
-// startup is called when the app starts.
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-	logging.Info("NFA-Linux starting up...")
-}
-
-// shutdown is called when the app is closing.
-func (a *App) shutdown(ctx context.Context) {
-	logging.Info("NFA-Linux shutting down...")
-}
-
-// domReady is called when the DOM is ready.
-func (a *App) domReady(ctx context.Context) {
-	logging.Debug("DOM ready, initializing UI...")
-}
-
-// GetVersion returns the application version.
-func (a *App) GetVersion() string {
-	return Version
-}
-
-// GetSystemInfo returns system information.
-func (a *App) GetSystemInfo() map[string]interface{} {
-	return map[string]interface{}{
-		"version":    Version,
-		"buildTime":  BuildTime,
-		"gitCommit":  GitCommit,
-		"goVersion":  runtime.Version(),
-		"os":         runtime.GOOS,
-		"arch":       runtime.GOARCH,
-		"numCPU":     runtime.NumCPU(),
-		"gomaxprocs": runtime.GOMAXPROCS(0),
-	}
-}
-
 // startMetricsServer starts the Prometheus metrics HTTP server.
 func startMetricsServer(port int) {
 	mux := http.NewServeMux()
