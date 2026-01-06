@@ -19,17 +19,14 @@
     "lucide-react": "^0.363.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-force-graph-3d": "^1.29.0",
     "recharts": "^2.12.2",
     "tailwind-merge": "^2.2.2",
-    "three": "^0.160.0",
     "zustand": "^4.5.2"
   },
   "devDependencies": {
     "@types/d3": "^7.4.3",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
-    "@types/three": "^0.160.0",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
     "@typescript-eslint/parser": "^7.2.0",
     "@vitejs/plugin-react": "^4.2.1",
