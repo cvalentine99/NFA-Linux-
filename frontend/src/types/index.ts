@@ -178,6 +178,8 @@ export type AlertCategory =
 export interface CaptureState {
   isCapturing: boolean;
   interface: string;
+  pcapFile?: string;
+  isPcapComplete?: boolean;
   startTime: number;
   packetsCaptured: number;
   packetsDropped: number;

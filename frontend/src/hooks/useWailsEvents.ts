@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../stores/appStore'
 import type {
-  Packet, Flow, Alert, Statistics, CaptureState,
+  Packet, Flow, Alert, Statistics,
   TopologyData, ExtractedFile
 } from '../types'
 
@@ -30,7 +30,11 @@ interface StatsUpdatePayload {
 }
 
 interface CaptureStatePayload {
-  state: CaptureState
+  capturing: boolean
+  interface?: string
+  pcap?: string
+  pcapComplete?: boolean
+  stats?: Statistics
   timestamp: number
 }
 
@@ -153,8 +157,16 @@ export function useWailsEvents() {
   // Handle capture state change
   const handleCaptureState = useCallback((data: unknown) => {
     const payload = data as CaptureStatePayload
-    updateCaptureState(payload.state)
-  }, [updateCaptureState])
+    updateCaptureState({
+      isCapturing: payload.capturing,
+      interface: payload.interface || '',
+      pcapFile: payload.pcap || '',
+      isPcapComplete: payload.pcapComplete || false,
+    })
+    if (payload.stats) {
+      updateStatistics(payload.stats as Statistics)
+    }
+  }, [updateCaptureState, updateStatistics])
   
   // Handle topology update
   const handleTopologyUpdate = useCallback((data: unknown) => {

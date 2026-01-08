@@ -344,7 +344,7 @@ func (a *App) StartCapture(iface, filter string) error {
 	go func() {
 		if err := a.engine.Start(captureCtx); err != nil {
 			logging.Errorf("Capture engine error: %v", err)
-			a.emitEvent("capture:error", map[string]string{"message": err.Error()})
+			a.emitEvent("error", map[string]interface{}{"message": err.Error(), "type": "capture"})
 		}
 	}()
 
@@ -352,7 +352,8 @@ func (a *App) StartCapture(iface, filter string) error {
 	a.stats.StartTime = time.Now()
 
 	logging.Infof("Started capture on interface %s", iface)
-	a.emitEvent("capture:started", map[string]interface{}{
+	a.emitEvent("capture:state", map[string]interface{}{
+		"capturing": true,
 		"interface": iface,
 		"filter":    filter,
 		"timestamp": time.Now().UnixNano(),
@@ -385,7 +386,8 @@ func (a *App) StopCapture() error {
 	a.isCapturing = false
 
 	logging.Info("Stopped packet capture")
-	a.emitEvent("capture:stopped", map[string]interface{}{
+	a.emitEvent("capture:state", map[string]interface{}{
+		"capturing": false,
 		"timestamp": time.Now().UnixNano(),
 		"stats":     a.GetStats(),
 	})
@@ -560,22 +562,25 @@ func (a *App) LoadPCAP(path string) error {
 			a.captureMu.Lock()
 			a.isCapturing = false
 			a.captureMu.Unlock()
-			a.emitEvent("pcap:complete", map[string]interface{}{
-				"path":      path,
-				"stats":     a.GetStats(),
-				"timestamp": time.Now().UnixNano(),
+			a.emitEvent("capture:state", map[string]interface{}{
+				"capturing":    false,
+				"pcapComplete": true,
+				"path":         path,
+				"stats":        a.GetStats(),
+				"timestamp":    time.Now().UnixNano(),
 			})
 		}()
 
 		if err := a.engine.Start(captureCtx); err != nil && err != context.Canceled {
 			logging.Errorf("PCAP processing error: %v", err)
-			a.emitEvent("capture:error", map[string]string{"message": err.Error()})
+			a.emitEvent("error", map[string]interface{}{"message": err.Error(), "type": "capture"})
 		}
 	}()
 
 	logging.Infof("Loading PCAP file: %s", path)
-	a.emitEvent("pcap:loading", map[string]interface{}{
-		"path":      path,
+	a.emitEvent("capture:state", map[string]interface{}{
+		"capturing": true,
+		"pcap":      path,
 		"timestamp": time.Now().UnixNano(),
 	})
 
