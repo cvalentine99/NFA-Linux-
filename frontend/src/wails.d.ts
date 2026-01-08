@@ -48,18 +48,86 @@ interface WailsRuntime {
 
 // Go backend App interface - methods exposed from Go
 interface GoApp {
-  StartCapture(iface: string): Promise<void>
+  StartCapture(iface: string, filter: string): Promise<void>
   StopCapture(): Promise<void>
-  GetInterfaces(): Promise<string[]>
-  ExportEvidence(path: string): Promise<void>
-  GetStatistics(): Promise<Statistics>
-  GetFlows(): Promise<Flow[]>
-  GetPackets(offset: number, limit: number): Promise<Packet[]>
-  GetAlerts(): Promise<Alert[]>
-  GetFiles(): Promise<CarvedFile[]>
-  AcknowledgeAlert(id: string): Promise<void>
-  SetBPFFilter(filter: string): Promise<void>
-  GetTopology(): Promise<TopologyData>
+  ListInterfaces(): Promise<InterfaceInfo[]>
+  IsCapturing(): Promise<boolean>
+  GetStats(): Promise<StatsDTO>
+  GetFlows(): Promise<FlowDTO[]>
+  GetPackets(offset: number, limit: number): Promise<PacketDTO[]>
+  GetPacketCount(): Promise<number>
+  GetAlerts(): Promise<AlertDTO[]>
+  GetFiles(): Promise<FileDTO[]>
+  LoadPCAP(path: string): Promise<void>
+  GetVersion(): Promise<string>
+  GetSystemInfo(): Promise<Record<string, unknown>>
+}
+
+// Backend DTO types
+interface InterfaceInfo {
+  name: string
+  description: string
+  addresses: string[]
+  flags: string[]
+}
+
+interface StatsDTO {
+  packetsReceived: number
+  packetsDropped: number
+  bytesProcessed: number
+  flowCount: number
+  alertCount: number
+  fileCount: number
+  startTime: number
+  uptime: number
+}
+
+interface PacketDTO {
+  id: string
+  timestamp: number
+  srcIP: string
+  dstIP: string
+  srcPort: number
+  dstPort: number
+  protocol: string
+  length: number
+  info: string
+}
+
+interface FlowDTO {
+  id: string
+  srcIP: string
+  dstIP: string
+  srcPort: number
+  dstPort: number
+  protocol: string
+  packets: number
+  bytes: number
+  startTime: number
+  lastSeen: number
+  state: string
+}
+
+interface AlertDTO {
+  id: string
+  timestamp: number
+  severity: string
+  category: string
+  message: string
+  srcIP: string
+  dstIP: string
+}
+
+interface FileDTO {
+  id: string
+  filename: string
+  mimeType: string
+  size: number
+  md5: string
+  sha256: string
+  srcIP: string
+  dstIP: string
+  timestamp: number
 }
 
 // Go main package bindings

@@ -4,8 +4,8 @@ import {
   LayoutDashboard, Package, GitBranch, FileText, AlertTriangle,
   Network, Play, Square, Settings, Search, Wifi, WifiOff
 } from 'lucide-react'
-import { useWailsEvents } from '@/hooks/useWailsEvents'
-import { useState } from 'react'
+import { useWailsEvents, useWailsBackend } from '@/hooks/useWailsEvents'
+import { useState, useEffect } from 'react'
 
 // Navigation items
 const navItems = [
@@ -25,17 +25,42 @@ function App() {
   const flowCount = useFlowCount()
   const alertCount = useAlertCount()
   const files = useAppStore(state => state.files)
-  const { startCapture, stopCapture } = useAppStore()
+  const updateCaptureState = useAppStore(state => state.updateCaptureState)
   const [searchValue, setSearchValue] = useState('')
+  const [, setInterfaces] = useState<string[]>([])
+  const [selectedInterface, setSelectedInterface] = useState('any')
   
-  // Initialize Wails event listeners
+  // Initialize Wails event listeners and backend
   useWailsEvents()
+  const { startCapture: backendStartCapture, stopCapture: backendStopCapture, getInterfaces } = useWailsBackend()
   
-  const handleCaptureToggle = () => {
-    if (capture.isCapturing) {
-      stopCapture()
-    } else {
-      startCapture('eth0')
+  // Load interfaces on mount
+  useEffect(() => {
+    const loadInterfaces = async () => {
+      try {
+        const ifaces = await getInterfaces()
+        if (ifaces && ifaces.length > 0) {
+          setInterfaces(ifaces)
+          setSelectedInterface(ifaces[0])
+        }
+      } catch (e) {
+        console.error('Failed to load interfaces:', e)
+      }
+    }
+    loadInterfaces()
+  }, [getInterfaces])
+  
+  const handleCaptureToggle = async () => {
+    try {
+      if (capture.isCapturing) {
+        await backendStopCapture()
+        updateCaptureState({ isCapturing: false })
+      } else {
+        await backendStartCapture(selectedInterface)
+        updateCaptureState({ isCapturing: true, interface: selectedInterface, startTime: Date.now() })
+      }
+    } catch (e) {
+      console.error('Capture toggle failed:', e)
     }
   }
   

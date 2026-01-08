@@ -222,7 +222,7 @@ export function useWailsBackend() {
   const startCapture = useCallback(async (iface: string) => {
     const app = window.go?.main?.App
     if (app?.StartCapture) {
-      await app.StartCapture(iface)
+      await app.StartCapture(iface, '')  // iface, filter
     } else {
       console.warn('StartCapture not available')
     }
@@ -239,19 +239,20 @@ export function useWailsBackend() {
   
   const getInterfaces = useCallback(async (): Promise<string[]> => {
     const app = window.go?.main?.App
-    if (app?.GetInterfaces) {
-      return await app.GetInterfaces()
+    if (app?.ListInterfaces) {
+      const ifaces = await app.ListInterfaces()
+      return ifaces.map((i) => i.name)
     }
-    console.warn('GetInterfaces not available')
+    console.warn('ListInterfaces not available')
     return []
   }, [])
   
-  const exportEvidence = useCallback(async (path: string) => {
+  const loadPCAP = useCallback(async (path: string) => {
     const app = window.go?.main?.App
-    if (app?.ExportEvidence) {
-      await app.ExportEvidence(path)
+    if (app?.LoadPCAP) {
+      await app.LoadPCAP(path)
     } else {
-      console.warn('ExportEvidence not available')
+      console.warn('LoadPCAP not available')
     }
   }, [])
   
@@ -259,7 +260,7 @@ export function useWailsBackend() {
     startCapture,
     stopCapture,
     getInterfaces,
-    exportEvidence,
+    loadPCAP,
   }
 }
 
