@@ -218,7 +218,25 @@ export interface Statistics {
     protocol: string;
     count: number;
   }[];
+  /**
+   * Extended backend statistics - AUTHORITATIVE data from backend
+   * Fields that are not tracked by the backend are marked as 0 above
+   */
+  _backend?: {
+    alertCount: number;
+    fileCount: number;
+    droppedPackets: number;
+    packetsPerSec: number;
+    bytesPerSec: number;
+    memoryUsage: number;
+    captureTime: number;
+    interface: string;
+    isCapturing: boolean;
+  };
 }
+
+// Connection state for staleness tracking
+export type ConnectionState = 'connected' | 'disconnected' | 'stale';
 
 // Network topology types
 export interface TopologyNode {

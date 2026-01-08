@@ -741,6 +741,20 @@ func (a *App) statsUpdater() {
 			lastTime = now
 			a.statsMu.Unlock()
 
+			// FIX C3: Propagate kernel drop stats from capture engine
+			// This is CRITICAL for forensic accuracy - operators MUST know if packets were dropped
+			a.captureMu.RLock()
+			if a.engine != nil {
+				engineStats := a.engine.Stats()
+				if engineStats != nil {
+					a.statsMu.Lock()
+					// Use kernel-reported drops, not just memory pressure drops
+					a.droppedPackets = int64(engineStats.PacketsDropped)
+					a.statsMu.Unlock()
+				}
+			}
+			a.captureMu.RUnlock()
+
 			// Emit stats update with correct structure for frontend
 			a.emitEvent("stats:update", map[string]interface{}{
 				"stats":     a.GetStats(),
@@ -846,6 +860,144 @@ func (a *App) getInterfaceName() string {
 		return a.config.Interface
 	}
 	return ""
+}
+
+// EvidenceExport represents exported forensic evidence
+type EvidenceExport struct {
+	ExportTime     int64                  `json:"export_time"`
+	CaptureStart   int64                  `json:"capture_start"`
+	CaptureEnd     int64                  `json:"capture_end"`
+	Interface      string                 `json:"interface"`
+	PacketCount    int64                  `json:"packet_count"`
+	ByteCount      int64                  `json:"byte_count"`
+	FlowCount      int64                  `json:"flow_count"`
+	DroppedPackets int64                  `json:"dropped_packets"`
+	AlertCount     int64                  `json:"alert_count"`
+	FileCount      int64                  `json:"file_count"`
+	Packets        []*PacketDTO           `json:"packets"`
+	Flows          []*FlowDTO             `json:"flows"`
+	Alerts         []*AlertDTO            `json:"alerts"`
+	Files          []*FileDTO             `json:"files"`
+	Metadata       map[string]interface{} `json:"metadata"`
+}
+
+// ExportEvidence exports captured evidence for forensic analysis
+// FIX H4: This method was missing - evidence export is CRITICAL for forensic workflows
+// Returns error if no evidence has been captured (writing empty evidence is forensically invalid)
+func (a *App) ExportEvidence() (*EvidenceExport, error) {
+	a.packetsMu.RLock()
+	a.flowsMu.RLock()
+	a.alertsMu.RLock()
+	a.filesMu.RLock()
+	a.statsMu.RLock()
+	defer func() {
+		a.packetsMu.RUnlock()
+		a.flowsMu.RUnlock()
+		a.alertsMu.RUnlock()
+		a.filesMu.RUnlock()
+		a.statsMu.RUnlock()
+	}()
+
+	// CRITICAL: Refuse to export empty evidence - this would be forensically invalid
+	if a.packetIdx == 0 {
+		return nil, errors.New("no evidence to export: no packets have been captured")
+	}
+
+	// Build packet list
+	packets := make([]*PacketDTO, 0)
+	available := int(a.packetIdx)
+	if available > a.maxPackets {
+		available = a.maxPackets
+	}
+	for i := 0; i < available; i++ {
+		idx := (a.packetHead - available + i + a.maxPackets) % a.maxPackets
+		if idx < 0 {
+			idx += a.maxPackets
+		}
+		if a.packets[idx] != nil {
+			packets = append(packets, a.packetToDTO(a.packets[idx]))
+		}
+	}
+
+	// Build flow list
+	flows := make([]*FlowDTO, 0, len(a.flows))
+	for _, flow := range a.flows {
+		flows = append(flows, a.flowToDTO(flow))
+	}
+
+	// Build alert list
+	alerts := make([]*AlertDTO, len(a.alerts))
+	copy(alerts, a.alerts)
+
+	// Build file list
+	files := make([]*FileDTO, 0, len(a.files))
+	for _, file := range a.files {
+		files = append(files, a.fileToDTO(file))
+	}
+
+	// Build export metadata
+	captureStart := int64(0)
+	captureEnd := time.Now().UnixNano()
+	if !a.stats.StartTime.IsZero() {
+		captureStart = a.stats.StartTime.UnixNano()
+	}
+
+	export := &EvidenceExport{
+		ExportTime:     time.Now().UnixNano(),
+		CaptureStart:   captureStart,
+		CaptureEnd:     captureEnd,
+		Interface:      a.getInterfaceName(),
+		PacketCount:    a.packetIdx,
+		ByteCount:      int64(a.stats.BytesReceived),
+		FlowCount:      int64(len(a.flows)),
+		DroppedPackets: a.droppedPackets,
+		AlertCount:     int64(len(a.alerts)),
+		FileCount:      int64(len(a.files)),
+		Packets:        packets,
+		Flows:          flows,
+		Alerts:         alerts,
+		Files:          files,
+		Metadata: map[string]interface{}{
+			"version":       Version,
+			"exportFormat":  "nfa-evidence-v1",
+			"systemInfo":    a.GetSystemInfo(),
+			"captureFilter": a.stats.CaptureFilter,
+		},
+	}
+
+	logging.Infof("Exported evidence: %d packets, %d flows, %d alerts, %d files",
+		len(packets), len(flows), len(alerts), len(files))
+
+	return export, nil
+}
+
+// GetEvidenceSummary returns a summary of captured evidence without full export
+// Useful for UI display before committing to a full export
+func (a *App) GetEvidenceSummary() map[string]interface{} {
+	a.packetsMu.RLock()
+	a.flowsMu.RLock()
+	a.alertsMu.RLock()
+	a.filesMu.RLock()
+	a.statsMu.RLock()
+	defer func() {
+		a.packetsMu.RUnlock()
+		a.flowsMu.RUnlock()
+		a.alertsMu.RUnlock()
+		a.filesMu.RUnlock()
+		a.statsMu.RUnlock()
+	}()
+
+	return map[string]interface{}{
+		"hasEvidence":    a.packetIdx > 0,
+		"packetCount":    a.packetIdx,
+		"byteCount":      a.stats.BytesReceived,
+		"flowCount":      len(a.flows),
+		"alertCount":     len(a.alerts),
+		"fileCount":      len(a.files),
+		"droppedPackets": a.droppedPackets,
+		"interface":      a.getInterfaceName(),
+		"isCapturing":    a.isCapturing,
+	}
 }
 
 

@@ -5,7 +5,7 @@ import { useMemo, useRef } from 'react'
 import type {
   Packet, Flow, ExtractedFile, Alert, Statistics,
   CaptureState, ViewState, FilterState, TimeRange,
-  TopologyData
+  TopologyData, ConnectionState
 } from '../types'
 
 // Maximum items to keep in memory for performance
@@ -24,58 +24,66 @@ interface AppState {
   alertIds: string[]
   topology: TopologyData
   statistics: Statistics
-  
+
   // Capture state
   capture: CaptureState
-  
+
   // UI state
   view: ViewState
-  
+
+  // Connection and temporal state - CRITICAL for truth
+  connectionState: ConnectionState
+  lastEventTime: number // Timestamp of last event received
+
   // Version counters for memoization invalidation
   _packetVersion: number
   _flowVersion: number
   _alertVersion: number
   _filterVersion: number
-  
+
   // Actions - Packets
   addPackets: (packets: Packet[]) => void
   clearPackets: () => void
-  
+
   // Actions - Flows
   updateFlows: (flows: Flow[]) => void
   clearFlows: () => void
-  
+
   // Actions - Files
   addFile: (file: ExtractedFile) => void
   clearFiles: () => void
-  
+
   // Actions - Alerts
   addAlert: (alert: Alert) => void
   clearAlerts: () => void
   acknowledgeAlert: (id: string) => void
-  
+
   // Actions - Statistics
   updateStatistics: (stats: Statistics) => void
-  
+
   // Actions - Topology
   updateTopology: (data: TopologyData) => void
-  
+
   // Actions - Capture
   updateCaptureState: (state: Partial<CaptureState>) => void
   startCapture: (iface: string) => void
   stopCapture: () => void
-  
+
   // Actions - View
   setActiveView: (view: ViewState['activeView']) => void
   selectPacket: (id: string | null) => void
   selectFlow: (id: string | null) => void
   selectFile: (id: string | null) => void
   selectAlert: (id: string | null) => void
-  
+
   // Actions - Filters
   setFilter: (filter: Partial<FilterState>) => void
   clearFilters: () => void
   setTimeRange: (range: TimeRange) => void
+
+  // Actions - Connection/Temporal state
+  setConnectionState: (state: ConnectionState) => void
+  setLastEventTime: (time: number) => void
 }
 
 const initialStatistics: Statistics = {
@@ -135,7 +143,11 @@ export const useAppStore = create<AppState>()(
     statistics: initialStatistics,
     capture: initialCaptureState,
     view: initialViewState,
-    
+
+    // Connection state - starts as disconnected until runtime confirms
+    connectionState: 'disconnected' as ConnectionState,
+    lastEventTime: 0,
+
     // Version counters for memoization
     _packetVersion: 0,
     _flowVersion: 0,
@@ -298,6 +310,19 @@ export const useAppStore = create<AppState>()(
     setTimeRange: (range) => set((state) => {
       state.view.timeRange = range
       state._filterVersion++
+    }),
+
+    // Connection state actions - CRITICAL for temporal truth
+    setConnectionState: (connectionState) => set((state) => {
+      state.connectionState = connectionState
+    }),
+
+    setLastEventTime: (time) => set((state) => {
+      state.lastEventTime = time
+      // If we're receiving events, we're connected
+      if (state.connectionState === 'stale') {
+        state.connectionState = 'connected'
+      }
     }),
   }))
 )
@@ -536,6 +561,19 @@ export const useActiveView = () => useAppStore(state => state.view.activeView)
 export const useFilters = () => useAppStore(state => state.view.filters, shallow)
 export const useTimeRange = () => useAppStore(state => state.view.timeRange, shallow)
 export const useTopology = () => useAppStore(state => state.topology)
+
+// Connection and temporal state selectors - CRITICAL for truth indicators
+export const useConnectionState = () => useAppStore(state => state.connectionState)
+export const useLastEventTime = () => useAppStore(state => state.lastEventTime)
+
+/**
+ * Returns true if data is stale (no updates while capturing)
+ * This is the AUTHORITATIVE staleness indicator
+ */
+export const useIsDataStale = () => {
+  const connectionState = useAppStore(state => state.connectionState)
+  return connectionState === 'stale'
+}
 
 // =============================================================================
 // Legacy getters for backward compatibility (deprecated, use hooks instead)

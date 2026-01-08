@@ -278,17 +278,41 @@ export class MockWailsRuntime {
   }
 }
 
-// Initialize mock runtime if Wails runtime is not available
+/**
+ * Initialize mock runtime if Wails runtime is not available
+ * FIX Phase 8: Mock data must be clearly indicated
+ * Testing must never resemble production truth.
+ */
 export function initMockRuntime(): void {
   if (typeof window !== 'undefined' && !window.runtime) {
-    console.log('🔧 Initializing mock Wails runtime for development')
+    console.warn('⚠️ [MOCK MODE] Initializing mock Wails runtime - DATA IS SIMULATED')
     const mockRuntime = new MockWailsRuntime()
     ;(window as unknown as { runtime: MockWailsRuntime }).runtime = mockRuntime
-    
+
+    // Add visual indicator that mock data is active
+    const indicator = document.createElement('div')
+    indicator.id = 'mock-data-indicator'
+    indicator.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #f59e0b;
+      color: black;
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: bold;
+      z-index: 99999;
+      border-bottom-left-radius: 4px;
+      border-bottom-right-radius: 4px;
+    `
+    indicator.textContent = '⚠️ MOCK DATA - NOT REAL CAPTURE'
+    document.body.appendChild(indicator)
+
     // Start mock events after a short delay
     setTimeout(() => {
       mockRuntime.startMockEvents()
-      console.log('📡 Mock events started')
+      console.warn('⚠️ [MOCK MODE] Mock events started - all data is simulated')
     }, 1000)
   }
 }
