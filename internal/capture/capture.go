@@ -93,6 +93,9 @@ type Engine interface {
 
 	// SetBPFFilter sets a BPF filter at runtime.
 	SetBPFFilter(filter string) error
+
+	// Done returns a channel that is closed when capture is complete (for PCAP mode).
+	Done() <-chan struct{}
 }
 
 // CaptureEngine is the main capture engine implementation.
@@ -193,6 +196,21 @@ func (ce *CaptureEngine) Stop() error {
 func (ce *CaptureEngine) Stats() *models.CaptureStats {
 	ce.mu.RLock()
 	defer ce.mu.RUnlock()
+
+	// CRITICAL FIX: Get stats from underlying engine if available
+	// The underlying engine (PCAPEngine, AFPacketEngine, etc.) tracks actual packet counts
+	if ce.engine != nil {
+		engineStats := ce.engine.Stats()
+		if engineStats != nil {
+			// Merge with our stats (hosts, files, etc.)
+			engineStats.ActiveFlows = ce.stats.ActiveFlows
+			engineStats.ActiveSessions = ce.stats.ActiveSessions
+			engineStats.HostsDiscovered = ce.stats.HostsDiscovered
+			engineStats.FilesCarved = ce.stats.FilesCarved
+			engineStats.LastUpdate = time.Now()
+			return engineStats
+		}
+	}
 
 	stats := *ce.stats
 	stats.LastUpdate = time.Now()
@@ -301,4 +319,19 @@ func (ce *CaptureEngine) startPCAP(ctx context.Context) error {
 	ce.engine = engine
 
 	return engine.Start(ctx)
+}
+
+
+// Done returns a channel that is closed when capture is complete (for PCAP mode).
+func (ce *CaptureEngine) Done() <-chan struct{} {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	
+	if ce.engine != nil {
+		return ce.engine.Done()
+	}
+	// Return a closed channel if no engine
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }

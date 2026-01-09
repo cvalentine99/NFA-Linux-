@@ -22,12 +22,11 @@ type PCAPEngine struct {
 	handler PacketHandler
 	stats   *pcapStats
 	mu      sync.RWMutex
-
 	// Internal state
 	handle  *pcap.Handle
 	running int32
 	cancel  context.CancelFunc
-
+	done    chan struct{} // Signals when PCAP processing is complete
 	// Packet parsing
 	eth     layers.Ethernet
 	ip4     layers.IPv4
@@ -60,6 +59,7 @@ func NewPCAPEngine(cfg *Config) (*PCAPEngine, error) {
 	e := &PCAPEngine{
 		config: cfg,
 		stats:  &pcapStats{},
+		done:   make(chan struct{}),
 	}
 
 	// Initialize packet parser
@@ -159,6 +159,8 @@ func (e *PCAPEngine) SetBPFFilter(filter string) error {
 
 // readLoop reads packets from the PCAP file.
 func (e *PCAPEngine) readLoop(ctx context.Context) {
+	defer close(e.done) // Signal completion when done
+	
 	packetSource := gopacket.NewPacketSource(e.handle, e.handle.LinkType())
 	packetSource.DecodeOptions.Lazy = true
 	packetSource.DecodeOptions.NoCopy = true
@@ -270,3 +272,9 @@ func (e *PCAPEngine) parsePacketInfo(packet gopacket.Packet) *models.PacketInfo 
 
 // Ensure PCAPEngine implements Engine interface
 var _ Engine = (*PCAPEngine)(nil)
+
+
+// Done returns a channel that is closed when PCAP processing is complete.
+func (e *PCAPEngine) Done() <-chan struct{} {
+	return e.done
+}

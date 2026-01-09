@@ -62,7 +62,7 @@ func initWebKitEnv() {
 
 // Version information (set at build time)
 var (
-	Version   = "0.1.0-dev"
+	Version   = "0.2.1"
 	BuildTime = "unknown"
 	GitCommit = "unknown"
 )
@@ -577,8 +577,13 @@ func (a *HeadlessAnalyzer) run(ctx context.Context) error {
 		return err
 	}
 
-	// Wait for context cancellation
-	<-ctx.Done()
+	// Wait for either context cancellation or PCAP completion
+	select {
+	case <-ctx.Done():
+		// Context cancelled (timeout or signal)
+	case <-a.engine.Done():
+		// PCAP file processing complete
+	}
 
 	// Stop capture
 	if err := a.engine.Stop(); err != nil {

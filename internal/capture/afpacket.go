@@ -357,5 +357,11 @@ func (e *AFPacketEngine) parsePacketInfo(data []byte, timestampNano int64) *mode
 	return info
 }
 
+// Done returns a channel that never closes for live capture (runs until stopped).
+func (e *AFPacketEngine) Done() <-chan struct{} {
+	// Live capture never completes on its own, only when stopped
+	return make(chan struct{})
+}
+
 // Ensure AFPacketEngine implements Engine interface
 var _ Engine = (*AFPacketEngine)(nil)

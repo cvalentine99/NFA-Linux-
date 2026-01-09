@@ -1226,6 +1226,12 @@ func (w *xdpWorker) processPacket(data []byte, timestampNano int64) {
 	handler(data, info)
 }
 
+// Done returns a channel that never closes for live capture (runs until stopped).
+func (e *AFXDPEngine) Done() <-chan struct{} {
+	// Live capture never completes on its own, only when stopped
+	return make(chan struct{})
+}
+
 // Ensure AFXDPEngine implements Engine interface
 var _ Engine = (*AFXDPEngine)(nil)
 

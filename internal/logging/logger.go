@@ -99,11 +99,20 @@ func Init(cfg *Config) {
 
 // Default returns the default logger, initializing if necessary
 func Default() *Logger {
+	// If Init was already called, defaultLogger is set
+	if defaultLogger != nil {
+		return defaultLogger
+	}
+	// Otherwise, initialize with defaults
 	once.Do(func() {
 		if defaultLogger == nil {
 			Init(nil)
 		}
 	})
+	// Safety check - if still nil (shouldn't happen), create fallback
+	if defaultLogger == nil {
+		Init(nil)
+	}
 	return defaultLogger
 }
 
