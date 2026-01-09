@@ -8,24 +8,115 @@ import type {
 // Window type extensions are in types/index.ts
 // Go bindings are available via window.go.main.App
 
-// Event payload types
+// Event payload types matching backend DTOs
+interface PacketDTO {
+  id: string
+  timestampNano: number
+  length: number
+  srcIP: string
+  dstIP: string
+  srcPort: number
+  dstPort: number
+  protocol: string
+  appProtocol?: string
+  info?: string
+  payloadSize?: number
+  flowID?: string
+  direction?: string
+}
+
+interface FlowDTO {
+  id: string
+  srcIP: string
+  dstIP: string
+  srcPort: number
+  dstPort: number
+  protocol: string
+  appProtocol?: string
+  state: string
+  packetCount: number
+  byteCount: number
+  startTimeNano: number
+  endTimeNano: number
+  duration: number
+}
+
+interface AlertDTO {
+  id: string
+  timestamp: number
+  severity: string
+  category: string
+  title: string
+  description: string
+  srcIP?: string
+  dstIP?: string
+  flowID?: string
+  packetID?: string
+}
+
+interface FileDTO {
+  id: string
+  name: string
+  size: number
+  mimeType: string
+  md5?: string
+  sha1?: string
+  sha256: string
+  timestamp: number
+  flowID?: string
+  path: string
+}
+
+// Stats DTO matching backend structure
+interface StatsDTO {
+  packets: {
+    total: number
+    tcp: number
+    udp: number
+    icmp: number
+    other: number
+  }
+  bytes: {
+    total: number
+    inbound: number
+    outbound: number
+  }
+  flows: {
+    total: number
+    active: number
+    completed: number
+  }
+  protocols: Record<string, number>
+  topTalkers: Array<{ ip: string; packets: number; bytes: number }>
+  topPorts: Array<{ port: number; protocol: string; count: number }>
+  alertCount: number
+  fileCount: number
+  droppedPackets: number
+  packetsPerSec: number
+  bytesPerSec: number
+  memoryUsage: number
+  captureTime: number
+  interface: string
+  isCapturing: boolean
+}
+
 interface PacketBatchPayload {
-  packets: Packet[]
+  packets: PacketDTO[]
   timestamp: number
 }
 
 interface FlowUpdatePayload {
-  flows: Flow[]
+  flows: FlowDTO[]
   timestamp: number
 }
 
 interface AlertPayload {
-  alert: Alert
+  alert: AlertDTO
   timestamp: number
 }
 
 interface StatsUpdatePayload {
-  stats: Statistics
+  stats: StatsDTO
   timestamp: number
 }
 
@@ -34,7 +125,7 @@ interface CaptureStatePayload {
   interface?: string
   pcap?: string
   pcapComplete?: boolean
-  stats?: Statistics
+  stats?: StatsDTO
   timestamp: number
 }
 
@@ -44,13 +135,13 @@ interface TopologyUpdatePayload {
 }
 
 interface FileExtractedPayload {
-  file: ExtractedFile
+  file: FileDTO
   timestamp: number
 }
 
 interface ErrorPayload {
   message: string
-  code: string
+  type?: string
 }
 
 // Event names from Go backend
@@ -67,6 +158,125 @@ const EVENTS = {
 
 // Throttle configuration for high-frequency events
 const THROTTLE_MS = 16 // ~60fps
+
+// Validation functions
+function isValidPacketBatch(data: unknown): data is PacketBatchPayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'packets' in d && Array.isArray(d.packets) && 'timestamp' in d
+}
+
+function isValidFlowUpdate(data: unknown): data is FlowUpdatePayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'flows' in d && Array.isArray(d.flows) && 'timestamp' in d
+}
+
+function isValidStatsUpdate(data: unknown): data is StatsUpdatePayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'stats' in d && typeof d.stats === 'object'
+}
+
+function isValidAlert(data: unknown): data is AlertPayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'alert' in d && typeof d.alert === 'object'
+}
+
+function isValidCaptureState(data: unknown): data is CaptureStatePayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'capturing' in d && typeof d.capturing === 'boolean'
+}
+
+function isValidFileExtracted(data: unknown): data is FileExtractedPayload {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return 'file' in d && typeof d.file === 'object'
+}
+
+// Transform backend DTO to frontend type
+function transformPacket(dto: PacketDTO): Packet {
+  return {
+    id: dto.id,
+    timestampNano: dto.timestampNano,
+    srcIP: dto.srcIP,
+    dstIP: dto.dstIP,
+    srcPort: dto.srcPort,
+    dstPort: dto.dstPort,
+    protocol: dto.protocol as any,
+    length: dto.length,
+    payload: null,
+    layers: [],
+    metadata: {
+      captureInterface: '',
+      direction: (dto.direction as any) || 'unknown',
+      checksumValid: true,
+      truncated: false,
+    },
+  }
+}
+
+function transformFlow(dto: FlowDTO): Flow {
+  return {
+    id: dto.id,
+    srcIP: dto.srcIP,
+    dstIP: dto.dstIP,
+    srcPort: dto.srcPort,
+    dstPort: dto.dstPort,
+    protocol: dto.protocol as any,
+    startTimeNano: dto.startTimeNano,
+    endTimeNano: dto.endTimeNano,
+    packetCount: dto.packetCount,
+    byteCount: dto.byteCount,
+    state: dto.state as any,
+    metadata: {
+      applicationProtocol: dto.appProtocol,
+    },
+  }
+}
+
+function transformAlert(dto: AlertDTO): Alert {
+  return {
+    id: dto.id,
+    timestampNano: dto.timestamp,
+    severity: dto.severity as any,
+    category: dto.category as any,
+    title: dto.title,
+    description: dto.description,
+    sourceIP: dto.srcIP,
+    destIP: dto.dstIP,
+    relatedFlows: dto.flowID ? [dto.flowID] : [],
+    indicators: [],
+  }
+}
+
+function transformFile(dto: FileDTO): ExtractedFile {
+  return {
+    id: dto.id,
+    fileName: dto.name,
+    filePath: dto.path,
+    mimeType: dto.mimeType,
+    size: dto.size,
+    sha256: dto.sha256,
+    blake3: '',
+    sourceFlow: dto.flowID || '',
+    extractedAt: dto.timestamp,
+    isSuspicious: false,
+  }
+}
+
+function transformStats(dto: StatsDTO): Statistics {
+  return {
+    packets: dto.packets,
+    bytes: dto.bytes,
+    flows: dto.flows,
+    protocols: dto.protocols || {},
+    topTalkers: dto.topTalkers || [],
+    topPorts: dto.topPorts || [],
+  }
+}
 
 /**
  * Hook to initialize and manage Wails event listeners
@@ -88,6 +298,9 @@ export function useWailsEvents() {
   const flowBufferRef = useRef<Flow[]>([])
   const lastFlushRef = useRef<number>(0)
   const rafRef = useRef<number | null>(null)
+  
+  // Staleness tracking
+  const lastUpdateRef = useRef<number>(Date.now())
   
   // Flush buffered packets to store
   const flushPackets = useCallback(() => {
@@ -121,70 +334,119 @@ export function useWailsEvents() {
     }
   }, [flushPackets])
   
-  // Handle packet batch event
+  // Handle packet batch event with validation
   const handlePacketBatch = useCallback((data: unknown) => {
-    const payload = data as PacketBatchPayload
-    // Buffer packets for batched updates
-    packetBufferRef.current.push(...payload.packets)
+    if (!isValidPacketBatch(data)) {
+      console.error('Invalid packet batch payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    // Transform and buffer packets
+    const packets = data.packets.map(transformPacket)
+    packetBufferRef.current.push(...packets)
     scheduleFlush()
   }, [scheduleFlush])
   
-  // Handle flow update event
+  // Handle flow update event with validation
   const handleFlowUpdate = useCallback((data: unknown) => {
-    const payload = data as FlowUpdatePayload
-    // Buffer flows for batched updates
-    flowBufferRef.current.push(...payload.flows)
+    if (!isValidFlowUpdate(data)) {
+      console.error('Invalid flow update payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    // Transform and buffer flows
+    const flows = data.flows.map(transformFlow)
+    flowBufferRef.current.push(...flows)
     scheduleFlush()
   }, [scheduleFlush])
   
-  // Handle new alert event
+  // Handle new alert event with validation
   const handleAlert = useCallback((data: unknown) => {
-    const payload = data as AlertPayload
-    addAlert(payload.alert)
+    if (!isValidAlert(data)) {
+      console.error('Invalid alert payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    const alert = transformAlert(data.alert)
+    addAlert(alert)
     
     // Show notification for critical/high alerts
-    if (payload.alert.severity === 'critical' || payload.alert.severity === 'high') {
-      showAlertNotification(payload.alert)
+    if (alert.severity === 'critical' || alert.severity === 'high') {
+      showAlertNotification(alert)
     }
   }, [addAlert])
   
-  // Handle statistics update
+  // Handle statistics update with validation
   const handleStatsUpdate = useCallback((data: unknown) => {
-    const payload = data as StatsUpdatePayload
-    updateStatistics(payload.stats)
-  }, [updateStatistics])
-  
-  // Handle capture state change
-  const handleCaptureState = useCallback((data: unknown) => {
-    const payload = data as CaptureStatePayload
+    if (!isValidStatsUpdate(data)) {
+      console.error('Invalid stats update payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    const stats = transformStats(data.stats)
+    updateStatistics(stats)
+    
+    // Also update capture state from stats
     updateCaptureState({
-      isCapturing: payload.capturing,
-      interface: payload.interface || '',
-      pcapFile: payload.pcap || '',
-      isPcapComplete: payload.pcapComplete || false,
+      isCapturing: data.stats.isCapturing,
+      interface: data.stats.interface,
+      packetsCaptured: data.stats.packets.total,
+      packetsDropped: data.stats.droppedPackets,
+      bytesProcessed: data.stats.bytes.total,
+      flowsActive: data.stats.flows.active,
+      alertsGenerated: data.stats.alertCount,
     })
-    if (payload.stats) {
-      updateStatistics(payload.stats as Statistics)
+  }, [updateStatistics, updateCaptureState])
+  
+  // Handle capture state change with validation
+  const handleCaptureState = useCallback((data: unknown) => {
+    if (!isValidCaptureState(data)) {
+      console.error('Invalid capture state payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    updateCaptureState({
+      isCapturing: data.capturing,
+      interface: data.interface || '',
+      pcapFile: data.pcap || '',
+      isPcapComplete: data.pcapComplete || false,
+    })
+    
+    if (data.stats) {
+      updateStatistics(transformStats(data.stats))
     }
   }, [updateCaptureState, updateStatistics])
   
   // Handle topology update
   const handleTopologyUpdate = useCallback((data: unknown) => {
     const payload = data as TopologyUpdatePayload
-    updateTopology(payload.topology)
+    if (payload?.topology) {
+      lastUpdateRef.current = Date.now()
+      updateTopology(payload.topology)
+    }
   }, [updateTopology])
   
-  // Handle file extraction
+  // Handle file extraction with validation
   const handleFileExtracted = useCallback((data: unknown) => {
-    const payload = data as FileExtractedPayload
-    addFile(payload.file)
+    if (!isValidFileExtracted(data)) {
+      console.error('Invalid file extracted payload:', data)
+      return
+    }
+    lastUpdateRef.current = Date.now()
+    
+    const file = transformFile(data.file)
+    addFile(file)
   }, [addFile])
   
   // Handle errors
   const handleError = useCallback((data: unknown) => {
     const payload = data as ErrorPayload
-    console.error('Backend error:', payload.message, payload.code)
-    // Could show toast notification here
+    console.error('Backend error:', payload?.message, payload?.type)
   }, [])
   
   // Initialize event listeners
@@ -192,7 +454,6 @@ export function useWailsEvents() {
     const runtime = window.runtime
     if (!runtime) {
       console.warn('Wails runtime not available, running in development mode')
-      // In dev mode, we can simulate events or use mock data
       return
     }
     
@@ -225,6 +486,20 @@ export function useWailsEvents() {
     handleFileExtracted,
     handleError,
   ])
+  
+  // Staleness detection
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const capture = useAppStore.getState().capture
+      if (capture.isCapturing) {
+        const timeSinceUpdate = Date.now() - lastUpdateRef.current
+        if (timeSinceUpdate > 5000) {
+          console.warn('No backend updates in 5 seconds - connection may be stale')
+        }
+      }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [])
 }
 
 /**
@@ -253,7 +528,7 @@ export function useWailsBackend() {
     const app = window.go?.main?.App
     if (app?.ListInterfaces) {
       const ifaces = await app.ListInterfaces()
-      return ifaces.map((i) => i.name)
+      return ifaces.map((i: any) => i.name)
     }
     console.warn('ListInterfaces not available')
     return []
@@ -268,11 +543,21 @@ export function useWailsBackend() {
     }
   }, [])
   
+  const exportEvidence = useCallback(async (path: string) => {
+    const app = window.go?.main?.App
+    if (app?.ExportEvidence) {
+      await app.ExportEvidence(path)
+    } else {
+      console.warn('ExportEvidence not available')
+    }
+  }, [])
+  
   return {
     startCapture,
     stopCapture,
     getInterfaces,
     loadPCAP,
+    exportEvidence,
   }
 }
 

@@ -7,10 +7,10 @@ export namespace main {
 	    category: string;
 	    title: string;
 	    description: string;
-	    src_ip: string;
-	    dst_ip: string;
-	    flow_id: string;
-	    packet_id: string;
+	    srcIP: string;
+	    dstIP: string;
+	    flowID: string;
+	    packetID: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AlertDTO(source);
@@ -24,22 +24,38 @@ export namespace main {
 	        this.category = source["category"];
 	        this.title = source["title"];
 	        this.description = source["description"];
-	        this.src_ip = source["src_ip"];
-	        this.dst_ip = source["dst_ip"];
-	        this.flow_id = source["flow_id"];
-	        this.packet_id = source["packet_id"];
+	        this.srcIP = source["srcIP"];
+	        this.dstIP = source["dstIP"];
+	        this.flowID = source["flowID"];
+	        this.packetID = source["packetID"];
+	    }
+	}
+	export class ByteStatsDTO {
+	    total: number;
+	    inbound: number;
+	    outbound: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ByteStatsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total = source["total"];
+	        this.inbound = source["inbound"];
+	        this.outbound = source["outbound"];
 	    }
 	}
 	export class FileDTO {
 	    id: string;
 	    name: string;
 	    size: number;
-	    mime_type: string;
+	    mimeType: string;
 	    md5: string;
 	    sha1: string;
 	    sha256: string;
 	    timestamp: number;
-	    flow_id: string;
+	    flowID: string;
 	    path: string;
 	
 	    static createFrom(source: any = {}) {
@@ -51,28 +67,28 @@ export namespace main {
 	        this.id = source["id"];
 	        this.name = source["name"];
 	        this.size = source["size"];
-	        this.mime_type = source["mime_type"];
+	        this.mimeType = source["mimeType"];
 	        this.md5 = source["md5"];
 	        this.sha1 = source["sha1"];
 	        this.sha256 = source["sha256"];
 	        this.timestamp = source["timestamp"];
-	        this.flow_id = source["flow_id"];
+	        this.flowID = source["flowID"];
 	        this.path = source["path"];
 	    }
 	}
 	export class FlowDTO {
 	    id: string;
-	    src_ip: string;
-	    dst_ip: string;
-	    src_port: number;
-	    dst_port: number;
+	    srcIP: string;
+	    dstIP: string;
+	    srcPort: number;
+	    dstPort: number;
 	    protocol: string;
-	    app_protocol: string;
+	    appProtocol: string;
 	    state: string;
-	    packet_count: number;
-	    byte_count: number;
-	    start_time: number;
-	    last_activity: number;
+	    packetCount: number;
+	    byteCount: number;
+	    startTimeNano: number;
+	    endTimeNano: number;
 	    duration: number;
 	
 	    static createFrom(source: any = {}) {
@@ -82,26 +98,42 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
-	        this.src_ip = source["src_ip"];
-	        this.dst_ip = source["dst_ip"];
-	        this.src_port = source["src_port"];
-	        this.dst_port = source["dst_port"];
+	        this.srcIP = source["srcIP"];
+	        this.dstIP = source["dstIP"];
+	        this.srcPort = source["srcPort"];
+	        this.dstPort = source["dstPort"];
 	        this.protocol = source["protocol"];
-	        this.app_protocol = source["app_protocol"];
+	        this.appProtocol = source["appProtocol"];
 	        this.state = source["state"];
-	        this.packet_count = source["packet_count"];
-	        this.byte_count = source["byte_count"];
-	        this.start_time = source["start_time"];
-	        this.last_activity = source["last_activity"];
+	        this.packetCount = source["packetCount"];
+	        this.byteCount = source["byteCount"];
+	        this.startTimeNano = source["startTimeNano"];
+	        this.endTimeNano = source["endTimeNano"];
 	        this.duration = source["duration"];
+	    }
+	}
+	export class FlowStatsDTO {
+	    total: number;
+	    active: number;
+	    completed: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new FlowStatsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total = source["total"];
+	        this.active = source["active"];
+	        this.completed = source["completed"];
 	    }
 	}
 	export class InterfaceInfo {
 	    name: string;
 	    description: string;
-	    is_up: boolean;
-	    has_address: boolean;
-	    is_loopback: boolean;
+	    isUp: boolean;
+	    hasAddress: boolean;
+	    isLoopback: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new InterfaceInfo(source);
@@ -111,24 +143,25 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.description = source["description"];
-	        this.is_up = source["is_up"];
-	        this.has_address = source["has_address"];
-	        this.is_loopback = source["is_loopback"];
+	        this.isUp = source["isUp"];
+	        this.hasAddress = source["hasAddress"];
+	        this.isLoopback = source["isLoopback"];
 	    }
 	}
 	export class PacketDTO {
 	    id: string;
-	    timestamp: number;
+	    timestampNano: number;
 	    length: number;
-	    src_ip: string;
-	    dst_ip: string;
-	    src_port: number;
-	    dst_port: number;
+	    srcIP: string;
+	    dstIP: string;
+	    srcPort: number;
+	    dstPort: number;
 	    protocol: string;
-	    app_protocol: string;
+	    appProtocol: string;
 	    info: string;
-	    payload_size: number;
-	    flow_id: string;
+	    payloadSize: number;
+	    flowID: string;
+	    direction: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PacketDTO(source);
@@ -137,32 +170,88 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
-	        this.timestamp = source["timestamp"];
+	        this.timestampNano = source["timestampNano"];
 	        this.length = source["length"];
-	        this.src_ip = source["src_ip"];
-	        this.dst_ip = source["dst_ip"];
-	        this.src_port = source["src_port"];
-	        this.dst_port = source["dst_port"];
+	        this.srcIP = source["srcIP"];
+	        this.dstIP = source["dstIP"];
+	        this.srcPort = source["srcPort"];
+	        this.dstPort = source["dstPort"];
 	        this.protocol = source["protocol"];
-	        this.app_protocol = source["app_protocol"];
+	        this.appProtocol = source["appProtocol"];
 	        this.info = source["info"];
-	        this.payload_size = source["payload_size"];
-	        this.flow_id = source["flow_id"];
+	        this.payloadSize = source["payloadSize"];
+	        this.flowID = source["flowID"];
+	        this.direction = source["direction"];
+	    }
+	}
+	export class PacketStatsDTO {
+	    total: number;
+	    tcp: number;
+	    udp: number;
+	    icmp: number;
+	    other: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PacketStatsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total = source["total"];
+	        this.tcp = source["tcp"];
+	        this.udp = source["udp"];
+	        this.icmp = source["icmp"];
+	        this.other = source["other"];
+	    }
+	}
+	export class TopPortDTO {
+	    port: number;
+	    protocol: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TopPortDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.port = source["port"];
+	        this.protocol = source["protocol"];
+	        this.count = source["count"];
+	    }
+	}
+	export class TopTalkerDTO {
+	    ip: string;
+	    packets: number;
+	    bytes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TopTalkerDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ip = source["ip"];
+	        this.packets = source["packets"];
+	        this.bytes = source["bytes"];
 	    }
 	}
 	export class StatsDTO {
-	    packet_count: number;
-	    byte_count: number;
-	    flow_count: number;
-	    alert_count: number;
-	    file_count: number;
-	    dropped_packets: number;
-	    packets_per_sec: number;
-	    bytes_per_sec: number;
-	    memory_usage: number;
-	    capture_time: number;
+	    packets: PacketStatsDTO;
+	    bytes: ByteStatsDTO;
+	    flows: FlowStatsDTO;
+	    protocols: {[key: string]: number};
+	    topTalkers: TopTalkerDTO[];
+	    topPorts: TopPortDTO[];
+	    alertCount: number;
+	    fileCount: number;
+	    droppedPackets: number;
+	    packetsPerSec: number;
+	    bytesPerSec: number;
+	    memoryUsage: number;
+	    captureTime: number;
 	    interface: string;
-	    is_capturing: boolean;
+	    isCapturing: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new StatsDTO(source);
@@ -170,20 +259,116 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.packet_count = source["packet_count"];
-	        this.byte_count = source["byte_count"];
-	        this.flow_count = source["flow_count"];
-	        this.alert_count = source["alert_count"];
-	        this.file_count = source["file_count"];
-	        this.dropped_packets = source["dropped_packets"];
-	        this.packets_per_sec = source["packets_per_sec"];
-	        this.bytes_per_sec = source["bytes_per_sec"];
-	        this.memory_usage = source["memory_usage"];
-	        this.capture_time = source["capture_time"];
+	        this.packets = this.convertValues(source["packets"], PacketStatsDTO);
+	        this.bytes = this.convertValues(source["bytes"], ByteStatsDTO);
+	        this.flows = this.convertValues(source["flows"], FlowStatsDTO);
+	        this.protocols = source["protocols"];
+	        this.topTalkers = this.convertValues(source["topTalkers"], TopTalkerDTO);
+	        this.topPorts = this.convertValues(source["topPorts"], TopPortDTO);
+	        this.alertCount = source["alertCount"];
+	        this.fileCount = source["fileCount"];
+	        this.droppedPackets = source["droppedPackets"];
+	        this.packetsPerSec = source["packetsPerSec"];
+	        this.bytesPerSec = source["bytesPerSec"];
+	        this.memoryUsage = source["memoryUsage"];
+	        this.captureTime = source["captureTime"];
 	        this.interface = source["interface"];
-	        this.is_capturing = source["is_capturing"];
+	        this.isCapturing = source["isCapturing"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	export class TopologyLinkDTO {
+	    source: string;
+	    target: string;
+	    protocol: string;
+	    packets: number;
+	    bytes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TopologyLinkDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source = source["source"];
+	        this.target = source["target"];
+	        this.protocol = source["protocol"];
+	        this.packets = source["packets"];
+	        this.bytes = source["bytes"];
 	    }
 	}
+	export class TopologyNodeDTO {
+	    id: string;
+	    ip: string;
+	    type: string;
+	    packetCount: number;
+	    byteCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TopologyNodeDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.ip = source["ip"];
+	        this.type = source["type"];
+	        this.packetCount = source["packetCount"];
+	        this.byteCount = source["byteCount"];
+	    }
+	}
+	export class TopologyDTO {
+	    nodes: TopologyNodeDTO[];
+	    links: TopologyLinkDTO[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TopologyDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.nodes = this.convertValues(source["nodes"], TopologyNodeDTO);
+	        this.links = this.convertValues(source["links"], TopologyLinkDTO);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 
 }
 

@@ -1,5 +1,4 @@
 /// <reference types="vite/client" />
-
 /**
  * Wails Runtime Type Declarations
  * These types define the interface between the React frontend and Go backend
@@ -61,37 +60,65 @@ interface GoApp {
   LoadPCAP(path: string): Promise<void>
   GetVersion(): Promise<string>
   GetSystemInfo(): Promise<Record<string, unknown>>
+  GetTopology(): Promise<TopologyDTO>
+  ExportEvidence(path: string): Promise<void>
 }
 
-// Backend DTO types
+// Backend DTO types matching gui_app.go
 interface InterfaceInfo {
   name: string
-  description: string
-  addresses: string[]
-  flags: string[]
+  description?: string
+  isUp?: boolean
+  hasAddress?: boolean
+  isLoopback?: boolean
 }
 
 interface StatsDTO {
-  packetsReceived: number
-  packetsDropped: number
-  bytesProcessed: number
-  flowCount: number
+  packets: {
+    total: number
+    tcp: number
+    udp: number
+    icmp: number
+    other: number
+  }
+  bytes: {
+    total: number
+    inbound: number
+    outbound: number
+  }
+  flows: {
+    total: number
+    active: number
+    completed: number
+  }
+  protocols: Record<string, number>
+  topTalkers: Array<{ ip: string; packets: number; bytes: number }>
+  topPorts: Array<{ port: number; protocol: string; count: number }>
   alertCount: number
   fileCount: number
-  startTime: number
-  uptime: number
+  droppedPackets: number
+  packetsPerSec: number
+  bytesPerSec: number
+  memoryUsage: number
+  captureTime: number
+  interface: string
+  isCapturing: boolean
 }
 
 interface PacketDTO {
   id: string
-  timestamp: number
+  timestampNano: number
+  length: number
   srcIP: string
   dstIP: string
   srcPort: number
   dstPort: number
   protocol: string
-  length: number
-  info: string
+  appProtocol?: string
+  info?: string
+  payloadSize?: number
+  flowID?: string
+  direction?: string
 }
 
 interface FlowDTO {
@@ -101,11 +128,13 @@ interface FlowDTO {
   srcPort: number
   dstPort: number
   protocol: string
-  packets: number
-  bytes: number
-  startTime: number
-  lastSeen: number
+  appProtocol?: string
   state: string
+  packetCount: number
+  byteCount: number
+  startTimeNano: number
+  endTimeNano: number
+  duration: number
 }
 
 interface AlertDTO {
@@ -113,21 +142,46 @@ interface AlertDTO {
   timestamp: number
   severity: string
   category: string
-  message: string
-  srcIP: string
-  dstIP: string
+  title: string
+  description: string
+  srcIP?: string
+  dstIP?: string
+  flowID?: string
+  packetID?: string
 }
 
 interface FileDTO {
   id: string
-  filename: string
-  mimeType: string
+  name: string
   size: number
-  md5: string
+  mimeType: string
+  md5?: string
+  sha1?: string
   sha256: string
-  srcIP: string
-  dstIP: string
   timestamp: number
+  flowID?: string
+  path: string
+}
+
+interface TopologyDTO {
+  nodes: TopologyNodeDTO[]
+  links: TopologyLinkDTO[]
+}
+
+interface TopologyNodeDTO {
+  id: string
+  ip: string
+  type: string
+  packetCount: number
+  byteCount: number
+}
+
+interface TopologyLinkDTO {
+  source: string
+  target: string
+  protocol: string
+  packets: number
+  bytes: number
 }
 
 // Go main package bindings
@@ -150,7 +204,7 @@ import type {
   Packet,
   Flow,
   Alert,
-  CarvedFile,
+  ExtractedFile,
   Statistics,
   TopologyData,
 } from './types'
@@ -159,10 +213,17 @@ export type {
   WailsRuntime,
   GoApp,
   GoBindings,
+  InterfaceInfo,
+  StatsDTO,
+  PacketDTO,
+  FlowDTO,
+  AlertDTO,
+  FileDTO,
+  TopologyDTO,
   Packet,
   Flow,
   Alert,
-  CarvedFile,
+  ExtractedFile,
   Statistics,
   TopologyData,
 }
