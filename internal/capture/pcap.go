@@ -214,7 +214,9 @@ func (e *PCAPEngine) parsePacketInfo(packet gopacket.Packet) *models.PacketInfo 
 		Interface:     e.config.PcapFile,
 	}
 
-	// Decode layers
+	// Issue 5 fix: clear decoded slice before each decode to prevent stale layer leakage
+	// (matches AF_PACKET parser behavior at afpacket.go:304)
+	e.decoded = e.decoded[:0]
 	if err := e.parser.DecodeLayers(packet.Data(), &e.decoded); err != nil {
 		atomic.AddUint64(&e.stats.ParseErrors, 1)
 	}

@@ -176,6 +176,7 @@ func (ce *CaptureEngine) Start(ctx context.Context) error {
 }
 
 // Stop halts packet capture.
+// Issue 1 fix: invoke underlying backend Stop() to release socket/ring resources deterministically.
 func (ce *CaptureEngine) Stop() error {
 	ce.mu.Lock()
 	defer ce.mu.Unlock()
@@ -184,12 +185,19 @@ func (ce *CaptureEngine) Stop() error {
 		return errors.New("capture: engine not running")
 	}
 
+	// Cancel context first to signal goroutines to exit
 	if ce.cancel != nil {
 		ce.cancel()
 	}
 
+	// Stop underlying backend to release socket/ring/TPacket resources
+	var backendErr error
+	if ce.engine != nil {
+		backendErr = ce.engine.Stop()
+	}
+
 	ce.running = false
-	return nil
+	return backendErr
 }
 
 // Stats returns current capture statistics.

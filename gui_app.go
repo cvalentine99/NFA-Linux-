@@ -572,6 +572,13 @@ func (a *App) StartCapture(iface, filter string) error {
 	captureCtx, cancel := context.WithCancel(a.ctx)
 	a.cancelFunc = cancel
 
+	// Issue 4 fix: start reassembler flush loop so stale connections are reaped
+	if a.reassembler != nil {
+		if err := a.reassembler.Start(captureCtx); err != nil {
+			logging.Warnf("Failed to start reassembler: %v", err)
+		}
+	}
+
 	// Start capture
 	go func() {
 		if err := a.engine.Start(captureCtx); err != nil {
@@ -607,6 +614,11 @@ func (a *App) StopCapture() error {
 	if a.cancelFunc != nil {
 		a.cancelFunc()
 		a.cancelFunc = nil
+	}
+
+	// Issue 4 fix: stop reassembler to flush remaining streams and halt flush loop
+	if a.reassembler != nil {
+		a.reassembler.Stop()
 	}
 
 	// Stop engine

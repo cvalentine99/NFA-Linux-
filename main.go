@@ -572,6 +572,13 @@ func (a *HeadlessAnalyzer) handlePacket(data []byte, info *models.PacketInfo) {
 }
 
 func (a *HeadlessAnalyzer) run(ctx context.Context) error {
+	// Issue 4 fix: start reassembler flush loop before capture begins
+	if a.reassembler != nil {
+		if err := a.reassembler.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start reassembler: %w", err)
+		}
+	}
+
 	// Start capture
 	if err := a.engine.Start(ctx); err != nil {
 		return err
@@ -718,15 +725,22 @@ func startMetricsServer(port int) {
 		w.Write([]byte("OK"))
 	})
 
-	addr := fmt.Sprintf(":%d", port)
+	// Issue 6 fix: default-bind to loopback for desktop-safe exposure.
+	// Respects NFA_METRICS_ADDR env var for explicit non-local binding.
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if envAddr := os.Getenv("NFA_METRICS_ADDR"); envAddr != "" {
+		addr = envAddr
+	}
 	logging.Infof("Starting metrics server on %s", addr)
 
 	// Start system metrics updater
 	go updateSystemMetrics()
 
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

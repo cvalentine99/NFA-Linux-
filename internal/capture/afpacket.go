@@ -216,26 +216,27 @@ func (e *AFPacketEngine) SetHandler(handler PacketHandler) {
 }
 
 // SetBPFFilter sets a BPF filter at runtime.
+// Issue 2 fix: propagates the fail-fast error if filter compilation is unsupported.
 func (e *AFPacketEngine) SetBPFFilter(filter string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if err := e.setBPFFilterInternal(filter); err != nil {
+		return err
+	}
 	e.config.BPFFilter = filter
-	return e.setBPFFilterInternal(filter)
+	return nil
 }
 
 // setBPFFilterInternal sets the BPF filter (must be called with lock held).
+// Issue 2 fix: fail fast when a BPF filter is supplied, since AF_PACKET filter
+// compilation is not yet implemented. Silently ignoring filters is a policy bypass.
 func (e *AFPacketEngine) setBPFFilterInternal(filter string) error {
-	if e.tpacket == nil {
+	if filter == "" {
 		return nil
 	}
 
-	// Compile and set BPF filter
-	// Note: This requires libpcap for filter compilation
-	// For pure Go, we would use github.com/packetcap/go-pcap/filter
-	// For now, we'll skip this and implement it later
-
-	return nil
+	return fmt.Errorf("afpacket: BPF filter %q requested but filter compilation is not implemented; refusing to capture without enforced filter", filter)
 }
 
 // setPromiscuous enables or disables promiscuous mode.

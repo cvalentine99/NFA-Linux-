@@ -4,6 +4,8 @@ package ml
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +86,12 @@ func (c *MLSidecarClient) Connect(ctx context.Context) error {
 		return nil
 	}
 
+	// Issue 8 fix: reject non-loopback addresses when using insecure transport.
+	// insecure.NewCredentials() is only safe for localhost connections.
+	if !isLoopbackAddress(c.config.Address) {
+		return fmt.Errorf("refusing insecure gRPC connection to non-loopback address %q; configure TLS for remote sidecar endpoints", c.config.Address)
+	}
+
 	// Configure keepalive
 	kaParams := keepalive.ClientParameters{
 		Time:                c.config.KeepAliveTime,
@@ -113,6 +121,29 @@ func (c *MLSidecarClient) Connect(ctx context.Context) error {
 	c.lastError = nil
 
 	return nil
+}
+
+// isLoopbackAddress returns true if the address targets localhost/loopback.
+func isLoopbackAddress(address string) bool {
+	host := address
+	// Strip port if present
+	if h, _, err := net.SplitHostPort(address); err == nil {
+		host = h
+	}
+
+	// Check well-known loopback names
+	switch strings.ToLower(host) {
+	case "localhost", "":
+		return true
+	}
+
+	// Parse and check if IP is loopback
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+
+	return false
 }
 
 // Disconnect closes the connection

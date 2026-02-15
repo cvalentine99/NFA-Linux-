@@ -60,11 +60,12 @@ ARG BUILD_TIME
 ARG GIT_COMMIT
 
 # Build the application
+# Issue 3 fix: build target was ./main_app.go which does not exist; actual entrypoint is main.go
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.GitCommit=${GIT_COMMIT}'" \
     -trimpath \
     -o /app/nfa-linux \
-    ./main_app.go
+    .
 
 # ============================================================================
 # Stage 3: Production Runtime
@@ -152,8 +153,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/app/nfa-linux", "-version"]
 
 # Default to headless mode
+# Issue 3 fix: removed -config flag which does not exist in main.go CLI contract
 ENTRYPOINT ["/app/nfa-linux"]
-CMD ["-headless", "-config", "/app/config/config.yaml"]
+CMD ["-headless"]
 
 # ============================================================================
 # Stage 4: Development Runtime (optional)
@@ -178,4 +180,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER nfa-linux
 
 # Override for development
-CMD ["-headless", "-config", "/app/config/config.yaml", "-debug"]
+# Issue 3 fix: removed -config flag which does not exist in main.go CLI contract
+CMD ["-headless", "-debug"]

@@ -42,7 +42,9 @@ services:
       - TZ=${TZ:-UTC}
       - NFA_LOG_LEVEL=${LOG_LEVEL:-info}
       - NFA_ML_ENABLED=${ML_ENABLED:-false}
-      - NFA_ML_ADDRESS=nfa-ml:50051
+      # Issue 7 fix: use 127.0.0.1 since main service uses network_mode:host
+      # and cannot resolve Docker bridge DNS names like "nfa-ml"
+      - NFA_ML_ADDRESS=127.0.0.1:50051
     
     # Volumes
     volumes:
@@ -109,9 +111,9 @@ services:
       - nfa-models:/app/models
       - nfa-ml-logs:/app/logs
     
-    # Ports (internal only when using host network for main app)
-    expose:
-      - "50051"
+    # Issue 7 fix: publish to host loopback so host-network main service can reach sidecar
+    ports:
+      - "127.0.0.1:50051:50051"
     
     # For GPU support (NVIDIA)
     deploy:

@@ -8,7 +8,8 @@ Wants=network.target
 Type=simple
 User=root
 Group=nfa-linux
-ExecStart=/usr/bin/nfa-linux --headless --capture --interface=%i
+# Issue 3 fix: removed --capture (not a valid flag), removed %i (invalid in non-template unit)
+ExecStart=/usr/bin/nfa-linux -headless
 ExecStop=/bin/kill -SIGTERM $MAINPID
 Restart=on-failure
 RestartSec=5
